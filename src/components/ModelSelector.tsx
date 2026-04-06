@@ -48,10 +48,10 @@ function isThinking(modelStr: string) {
   return typeof modelStr === 'string' && modelStr.endsWith('-thinking');
 }
 
-function hasThinkingVariant(modelId: string): boolean {
-  const map = getChatModelMap();
-  const cfg = map.get(modelId);
-  return !!(cfg?.thinkingId);
+function hasThinkingVariant(_modelId: string): boolean {
+  // All models can toggle extended thinking.
+  // Models that don't support it will simply ignore the parameter — no harm done.
+  return true;
 }
 
 interface ModelSelectorProps {

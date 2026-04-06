@@ -1270,6 +1270,11 @@ export async function sendMessage(
             onToolUse({ type: 'done', tool_use_id: parsed.tool_use_id, content: parsed.content, is_error: parsed.is_error });
           }
 
+          // Track text offset where tool work ends and final response begins
+          if (parsed.type === 'tool_text_offset' && onSystem) {
+            onSystem('tool_text_offset', '', parsed);
+          }
+
           if (parsed.type === 'message_stop') {
             processInlineArtifactText('', true);
             // 如果有文本内容才结束，否则可能是服务端工具中间的 message_stop

@@ -1,8 +1,9 @@
 /**
  * Vision API helper — called by bridge-server via Bun subprocess
  * Usage: bun vision-helper.ts <json-file-path>
- * Input JSON: { endpoint, apiKey, body }
+ * Input JSON: { endpoint, apiKey, body, format? }
  * Output: SSE lines to stdout
+ * Supports both Anthropic and OpenAI API formats
  */
 const args = process.argv.slice(2);
 const inputPath = args[0];
@@ -10,15 +11,20 @@ if (!inputPath) { console.error('Usage: bun vision-helper.ts <json-path>'); proc
 
 const fs = await import('fs');
 const input = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+const isOpenAI = input.format === 'openai';
 
 try {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (isOpenAI) {
+        headers['authorization'] = `Bearer ${input.apiKey}`;
+    } else {
+        headers['x-api-key'] = input.apiKey;
+        headers['anthropic-version'] = '2023-06-01';
+    }
+
     const response = await fetch(input.endpoint, {
         method: 'POST',
-        headers: {
-            'content-type': 'application/json',
-            'x-api-key': input.apiKey,
-            'anthropic-version': '2023-06-01',
-        },
+        headers,
         body: JSON.stringify(input.body),
     });
 
@@ -42,8 +48,30 @@ try {
             if (!line.startsWith('data: ')) continue;
             const data = line.slice(6).trim();
             if (data === '[DONE]') continue;
-            // Forward raw SSE event as JSON line
-            console.log(data);
+
+            if (isOpenAI) {
+                // Convert OpenAI SSE format to Anthropic format for bridge-server
+                try {
+                    const parsed = JSON.parse(data);
+                    const delta = parsed.choices?.[0]?.delta;
+                    if (delta?.content) {
+                        console.log(JSON.stringify({
+                            type: 'content_block_delta',
+                            delta: { type: 'text_delta', text: delta.content }
+                        }));
+                    }
+                    // Handle reasoning/thinking content if present
+                    if (delta?.reasoning_content) {
+                        console.log(JSON.stringify({
+                            type: 'content_block_delta',
+                            delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
+                        }));
+                    }
+                } catch { /* skip unparseable lines */ }
+            } else {
+                // Forward raw Anthropic SSE event as JSON line
+                console.log(data);
+            }
         }
     }
     console.log(JSON.stringify({ type: 'done' }));

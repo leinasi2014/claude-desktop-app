@@ -616,7 +616,31 @@ const MessageList = React.memo<MessageListProps>(({
                 const FRONTEND_HIDDEN = new Set(['WebSearch', 'WebFetch']);
                 const visibleToolCalls = msg.toolCalls.filter((tc: any) => !FRONTEND_HIDDEN.has(tc.name));
                 if (visibleToolCalls.length === 0) return null;
-                const isStale = (!loading && idx === messages.length - 1) || (idx < messages.length - 1) || !!msg.content;
+                const isCurrentMsg = idx === messages.length - 1;
+                const isStale = (!loading && isCurrentMsg) || (idx < messages.length - 1);
+
+                // Split text: work text (during tools) vs final text (after last tool done)
+                const fullText = extractTextContent(msg.content);
+                const offset = msg.toolTextEndOffset;
+                const hasOffset = offset && offset > 0 && offset < fullText.length;
+                const workText = hasOffset ? fullText.slice(0, offset).trim() : '';
+                const finalText = hasOffset ? fullText.slice(offset).trim() : '';
+                const isCurrentlyStreaming = loading && idx === messages.length - 1;
+                // Tag message for MarkdownRenderer below:
+                // - Streaming with tools: show nothing in main area (all text in tool section)
+                // - Complete with offset: show only final text
+                // - Complete without offset: show full text (fallback)
+                // During streaming: compute pending text (text after last tool's textBefore)
+                let consumedLen = 0;
+                for (const tc of visibleToolCalls) {
+                  if (tc.textBefore) consumedLen += tc.textBefore.length;
+                }
+                // Text currently being typed that hasn't been associated with a tool yet
+                const pendingWorkText_ui = isCurrentlyStreaming ? fullText.slice(consumedLen).trim() : '';
+
+                (msg as any)._finalText = isCurrentlyStreaming
+                  ? ''  // During streaming, all text goes in tool section
+                  : (hasOffset ? finalText : null);
 
                 const toolNames = visibleToolCalls.map((tc: any) => {
                   const nameMap: Record<string, string> = {
@@ -664,70 +688,93 @@ const MessageList = React.memo<MessageListProps>(({
                     </div>
 
                     {(msg.isToolCallsExpanded ?? !allDone) && (
-                      <div className="mt-2 ml-1 pl-4 border-l-2 border-claude-border space-y-3">
+                      <div className="mt-2 ml-1 pl-4 border-l-2 border-claude-border space-y-2">
                         {visibleToolCalls.map((tc: any, tcIdx: number) => {
                           const inputStr = tc.input ? (typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input, null, 2)) : '';
-                          const inputPreview = tc.input?.file_path || tc.input?.command || tc.input?.path || (inputStr.length > 80 ? inputStr.slice(0, 80) + '...' : inputStr);
+                          const rawPath = tc.input?.file_path || tc.input?.path || '';
+                          const shortPath = rawPath ? rawPath.split(/[/\\]/).pop() || rawPath : '';
+                          const actionLabel: Record<string, string> = {
+                            'Read': 'Read', 'Write': 'Write', 'Edit': 'Edit',
+                            'MultiEdit': 'Edit', 'Bash': '', 'Grep': 'Search',
+                            'Glob': 'Find', 'ListDir': 'List', 'Skill': 'Skill',
+                          };
+                          const prefix = actionLabel[tc.name] ?? tc.name;
+                          const fileOrCmd = shortPath || tc.input?.command || (inputStr.length > 80 ? inputStr.slice(0, 80) + '...' : inputStr);
+                          const inputPreview = (prefix && fileOrCmd) ? `${prefix} ${fileOrCmd}` : (fileOrCmd || prefix || tc.name);
                           const realStatus = (tc.status === 'running' && isStale) ? 'canceled' : tc.status;
                           const expandable = hasExpandableContent(tc.name, tc.input, tc.result);
                           const stats = getToolStats(tc.name, tc.input);
 
                           return (
-                            <div key={tc.id || tcIdx} className="text-[13px] bg-black/5 dark:bg-black/20 rounded-lg overflow-hidden border border-black/5 dark:border-white/5 mx-1 w-full">
-                              <div
-                                className={`flex items-center justify-between px-3 py-2 transition-colors ${expandable ? 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5' : ''}`}
-                                onClick={() => {
-                                  if (!expandable) return;
-                                  onSetMessages(prev =>
-                                    prev.map((m, i) => {
-                                      if (i !== idx) return m;
-                                      const newTc = [...m.toolCalls];
-                                      newTc[tcIdx] = { ...newTc[tcIdx], isExpanded: newTc[tcIdx].isExpanded === undefined ? true : !newTc[tcIdx].isExpanded };
-                                      return { ...m, toolCalls: newTc };
-                                    })
-                                  );
-                                }}
-                              >
-                                <div className="flex items-center gap-2 overflow-hidden">
-                                  {tc.name === 'Bash' ? (
-                                    <span className="text-claude-textSecondary font-mono font-bold">&gt;_</span>
-                                  ) : (
-                                    <FileText size={14} className="text-claude-textSecondary flex-shrink-0" />
-                                  )}
-                                  <span className="text-claude-text font-mono text-[12px] truncate">
-                                    {inputPreview || tc.name}
-                                  </span>
-                                </div>
-                                <div className="flex items-center gap-2 flex-shrink-0 ml-4">
-                                  {/* +N / -N line stats for Edit/Write */}
-                                  {stats && realStatus !== 'running' && (
-                                    <span className="text-[11px] font-mono flex items-center gap-1.5">
-                                      {stats.added > 0 && <span className="text-green-500 dark:text-green-400">+{stats.added}</span>}
-                                      {stats.removed > 0 && <span className="text-red-500 dark:text-red-400">-{stats.removed}</span>}
-                                    </span>
-                                  )}
-                                  {realStatus === 'running' && <span className="text-claude-textSecondary text-[12px] animate-shimmer-text">Running...</span>}
-                                  {realStatus === 'error' && <span className="text-red-400/80 text-[12px]">Failed</span>}
-                                  {expandable && (
-                                    <ChevronDown size={14} className={`text-claude-textSecondary transform transition-transform duration-200 ${(tc.isExpanded ?? false) ? 'rotate-180' : ''}`} />
-                                  )}
-                                </div>
-                              </div>
-                              {expandable && (tc.isExpanded ?? false) && (
-                                <div className="px-2 py-2 border-t border-black/5 dark:border-white/5">
-                                  {shouldUseDiffView(tc.name, tc.input) ? (
-                                    <ToolDiffView toolName={tc.name} input={tc.input} result={tc.result} />
-                                  ) : tc.result != null ? (
-                                    <div className="px-1 text-claude-textSecondary text-[12px] font-mono max-h-[400px] overflow-y-auto whitespace-pre-wrap bg-black/5 dark:bg-black/40 rounded-md p-2">
-                                      {typeof tc.result === 'string' ? (tc.result.length > 2000 ? tc.result.slice(0, 2000) + '...' : tc.result || '(Empty output)') : JSON.stringify(tc.result).slice(0, 2000)}
-                                    </div>
-                                  ) : null}
+                            <div key={tc.id || tcIdx}>
+                              {/* Interleaved text: what the model said BEFORE this tool call */}
+                              {tc.textBefore && (
+                                <div className="text-[13px] text-claude-textSecondary px-1 py-1.5 leading-relaxed">
+                                  {tc.textBefore}
                                 </div>
                               )}
+                              {/* Tool card */}
+                              <div className="text-[13px] bg-black/5 dark:bg-black/20 rounded-lg overflow-hidden border border-black/5 dark:border-white/5 mx-1 w-full">
+                                <div
+                                  className={`flex items-center justify-between px-3 py-2 transition-colors ${expandable ? 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5' : ''}`}
+                                  onClick={() => {
+                                    if (!expandable) return;
+                                    onSetMessages(prev =>
+                                      prev.map((m, i) => {
+                                        if (i !== idx) return m;
+                                        const newTc = [...m.toolCalls];
+                                        newTc[tcIdx] = { ...newTc[tcIdx], isExpanded: newTc[tcIdx].isExpanded === undefined ? true : !newTc[tcIdx].isExpanded };
+                                        return { ...m, toolCalls: newTc };
+                                      })
+                                    );
+                                  }}
+                                >
+                                  <div className="flex items-center gap-2 overflow-hidden">
+                                    {tc.name === 'Bash' ? (
+                                      <span className="text-claude-textSecondary font-mono font-bold">&gt;_</span>
+                                    ) : (
+                                      <FileText size={14} className="text-claude-textSecondary flex-shrink-0" />
+                                    )}
+                                    <span className="text-claude-text font-mono text-[12px] truncate">
+                                      {inputPreview || tc.name}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-shrink-0 ml-4">
+                                    {stats && realStatus !== 'running' && (
+                                      <span className="text-[11px] font-mono flex items-center gap-1.5">
+                                        {stats.added > 0 && <span className="text-green-500 dark:text-green-400">+{stats.added}</span>}
+                                        {stats.removed > 0 && <span className="text-red-500 dark:text-red-400">-{stats.removed}</span>}
+                                      </span>
+                                    )}
+                                    {realStatus === 'running' && <span className="text-claude-textSecondary text-[12px] animate-shimmer-text">Running...</span>}
+                                    {realStatus === 'error' && <span className="text-red-400/80 text-[12px]">Failed</span>}
+                                    {expandable && (
+                                      <ChevronDown size={14} className={`text-claude-textSecondary transform transition-transform duration-200 ${(tc.isExpanded ?? false) ? 'rotate-180' : ''}`} />
+                                    )}
+                                  </div>
+                                </div>
+                                {expandable && (tc.isExpanded ?? false) && (
+                                  <div className="px-2 py-2 border-t border-black/5 dark:border-white/5">
+                                    {shouldUseDiffView(tc.name, tc.input) ? (
+                                      <ToolDiffView toolName={tc.name} input={tc.input} result={tc.result} />
+                                    ) : tc.result != null ? (
+                                      <div className="px-1 text-claude-textSecondary text-[12px] font-mono max-h-[400px] overflow-y-auto whitespace-pre-wrap bg-black/5 dark:bg-black/40 rounded-md p-2">
+                                        {typeof tc.result === 'string' ? (tc.result.length > 2000 ? tc.result.slice(0, 2000) + '...' : tc.result || '(Empty output)') : JSON.stringify(tc.result).slice(0, 2000)}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           );
                         })}
-                        {allDone && (
+                        {/* Streaming: show latest text being generated */}
+                        {isCurrentlyStreaming && pendingWorkText_ui && (
+                          <div className="text-[13px] text-claude-textSecondary px-1 py-1.5 leading-relaxed animate-shimmer-text">
+                            {pendingWorkText_ui}
+                          </div>
+                        )}
+                        {allDone && !isCurrentlyStreaming && (
                           <div className="flex items-center gap-2 text-claude-textSecondary pt-1 pb-1">
                             <Check size={14} />
                             <span className="text-[13px]">Done</span>
@@ -755,7 +802,7 @@ const MessageList = React.memo<MessageListProps>(({
                 <DocumentCreationProcess drafts={normalizeDocumentDrafts(msg)} />
               )}
 
-              <MarkdownRenderer content={extractTextContent(msg.content)} citations={msg.citations} />
+              <MarkdownRenderer content={(msg as any)._finalText ?? extractTextContent(msg.content)} citations={msg.citations} />
               {normalizeMessageDocuments(msg).length > 0 && (
                 <div className="mt-2 mb-1 space-y-2">
                   {normalizeMessageDocuments(msg).map((doc, docIdx) => (
@@ -1279,6 +1326,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       if (buffered && buffered.length > 0) {
         setMessages(buffered);
         setLoading(isStreaming(activeId));
+        // Restore model from server even when using buffer for messages
+        const buffConvId = activeId;
+        getConversation(buffConvId).then(data => {
+          if (data?.model && viewingIdRef.current === buffConvId) {
+            setCurrentModelString(data.model);
+          }
+        }).catch(() => {});
       } else {
         setLoading(false);
         loadConversation(activeId);
@@ -1438,6 +1492,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       stopGeneration(trackedConversationId).catch(e => console.error('[Stop] error:', e));
     }
 
+    removeStreaming(trackedConversationId);
     setLoading(false);
     isCreatingRef.current = false;
     return true;
@@ -1679,7 +1734,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   };
 
   const handleSend = async (overrideText?: string) => {
-    const effectiveText = overrideText ?? inputText;
+    const effectiveText = (typeof overrideText === 'string') ? overrideText : inputText;
     const hasFiles = pendingFiles.some(f => f.status === 'done');
     const hasErrorFiles = pendingFiles.some(f => f.status === 'error');
     if ((!effectiveText.trim() && !hasFiles) || loading) {
@@ -1704,7 +1759,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     // 收集已上传的附件
     const uploadedFiles = pendingFiles.filter(f => f.status === 'done' && f.fileId);
     const attachmentsPayload = uploadedFiles.length > 0
-      ? uploadedFiles.map(f => ({ fileId: f.fileId!, fileName: f.fileName }))
+      ? uploadedFiles.map(f => ({ fileId: f.fileId!, fileName: f.fileName, fileType: f.fileType, mimeType: f.mimeType, size: f.size }))
       : null;
 
     // 构建乐观 UI 的附件数据
@@ -1818,11 +1873,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         });
       },
       (full) => {
-        if (!isStreamSessionActive(conversationId!, streamRequestId)) return;
+        // Always clean up streaming state and request count, even if session changed
         removeStreaming(conversationId!);
         messagesBufferRef.current.delete(conversationId!);
-        if (viewingIdRef.current === conversationId) setLoading(false);
         activeRequestCountRef.current = Math.max(0, activeRequestCountRef.current - 1);
+        if (!isStreamSessionActive(conversationId!, streamRequestId)) return;
+        if (viewingIdRef.current === conversationId) setLoading(false);
         abortControllerRef.current = null;
         isCreatingRef.current = false; // Reset flag
         clearStreamSession(conversationId!, streamRequestId);
@@ -1862,11 +1918,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
       },
       (err) => {
-        if (!isStreamSessionActive(conversationId!, streamRequestId)) return;
+        // Always clean up streaming state and request count, even if session changed
         removeStreaming(conversationId!);
         messagesBufferRef.current.delete(conversationId!);
-        if (viewingIdRef.current === conversationId) setLoading(false);
         activeRequestCountRef.current = Math.max(0, activeRequestCountRef.current - 1);
+        if (!isStreamSessionActive(conversationId!, streamRequestId)) return;
+        if (viewingIdRef.current === conversationId) setLoading(false);
         abortControllerRef.current = null;
         isCreatingRef.current = false;
         clearStreamSession(conversationId!, streamRequestId);
@@ -1956,6 +2013,16 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
         if (event === 'context_size' && data) {
           setContextInfo({ tokens: data.tokens, limit: data.limit });
+        }
+        if (event === 'tool_text_offset' && data && data.offset != null) {
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const lastMsg = newMsgs[newMsgs.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.toolTextEndOffset = data.offset;
+            }
+            return newMsgs;
+          });
         }
         // AskUserQuestion — engine needs user input
         if (event === 'ask_user' && data) {
@@ -2234,8 +2301,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     const attachmentIds = attachments.map((att: any) => att.id);
     return {
       attachmentIds,
-      attachmentsPayload: attachmentIds.length > 0
-        ? attachmentIds.map((fileId: string) => ({ fileId }))
+      attachmentsPayload: attachments.length > 0
+        ? attachments.map((att: any) => ({ fileId: att.id, fileName: att.file_name, fileType: att.file_type, mimeType: att.mime_type, size: att.file_size }))
         : null,
       optimisticAttachments: attachments,
     };
@@ -2301,11 +2368,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         });
       },
       (full) => {
-        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+        // Always clean up streaming state and request count
         removeStreaming(conversationId);
         messagesBufferRef.current.delete(conversationId);
-        if (viewingIdRef.current === conversationId) setLoading(false);
         activeRequestCountRef.current = Math.max(0, activeRequestCountRef.current - 1);
+        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+        if (viewingIdRef.current === conversationId) setLoading(false);
         abortControllerRef.current = null;
         clearStreamSession(conversationId, streamRequestId);
         setMessagesFor(conversationId, prev => {
@@ -2319,10 +2387,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         });
       },
       (err) => {
-        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
-        setLoading(false);
+        // Always clean up streaming state and request count
         removeStreaming(conversationId);
         activeRequestCountRef.current = Math.max(0, activeRequestCountRef.current - 1);
+        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+        setLoading(false);
         abortControllerRef.current = null;
         clearStreamSession(conversationId, streamRequestId);
         setMessages(prev => {
@@ -2371,6 +2440,16 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
         if (event === 'context_size' && data) {
           setContextInfo({ tokens: data.tokens, limit: data.limit });
+        }
+        if (event === 'tool_text_offset' && data && data.offset != null) {
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const lastMsg = newMsgs[newMsgs.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.toolTextEndOffset = data.offset;
+            }
+            return newMsgs;
+          });
         }
       },
       undefined,
@@ -2488,11 +2567,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         });
       },
       (full) => {
-        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+        // Always clean up streaming state and request count
         removeStreaming(conversationId);
         messagesBufferRef.current.delete(conversationId);
-        if (viewingIdRef.current === conversationId) setLoading(false);
         activeRequestCountRef.current = Math.max(0, activeRequestCountRef.current - 1);
+        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+        if (viewingIdRef.current === conversationId) setLoading(false);
         abortControllerRef.current = null;
         clearStreamSession(conversationId, streamRequestId);
         setMessagesFor(conversationId, prev => {
@@ -2506,10 +2586,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         });
       },
       (err) => {
-        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
-        setLoading(false);
+        // Always clean up streaming state and request count
         removeStreaming(conversationId);
         activeRequestCountRef.current = Math.max(0, activeRequestCountRef.current - 1);
+        if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+        setLoading(false);
         abortControllerRef.current = null;
         clearStreamSession(conversationId, streamRequestId);
         setMessages(prev => {
@@ -2558,6 +2639,16 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
         if (event === 'context_size' && data) {
           setContextInfo({ tokens: data.tokens, limit: data.limit });
+        }
+        if (event === 'tool_text_offset' && data && data.offset != null) {
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const lastMsg = newMsgs[newMsgs.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.toolTextEndOffset = data.offset;
+            }
+            return newMsgs;
+          });
         }
       },
       undefined,
@@ -2820,6 +2911,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     isNewChat={true}
                   />
                   <button
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={handleSend}
                     disabled={(!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || loading || pendingFiles.some(f => f.status === 'uploading')}
                     className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -3015,6 +3107,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       </button>
                     ) : (
                       <button
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={handleSend}
                         disabled={(!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
                         className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

@@ -152,6 +152,10 @@ function initServer(mainWindow) {
     // Stored per-request: the proxy reads these to know where to forward
     let proxyTarget = { apiKey: '', baseUrl: '', model: '', format: 'anthropic' };
 
+    // Pending image blocks to inject into the next API request (per-conversation)
+    // The chat handler stores base64 images here; the proxy injects them into the user message
+    const pendingImageBlocks = new Map(); // conversationId → [{ type: 'image', source: { type: 'base64', media_type, data } }]
+
     const proxyServer = http.createServer(async (req, res) => {
         if (req.method === 'POST' && req.url.includes('/messages')) {
             let body = '';
@@ -160,6 +164,30 @@ function initServer(mainWindow) {
                 try {
                     const anthropicReq = JSON.parse(body);
                     const target = proxyTarget;
+
+                    // Inject any pending image blocks into the last user message
+                    // (images uploaded by the user that need to be embedded in the API request)
+                    // Only inject into the initial user message (not tool_result follow-ups).
+                    // Don't delete — keep for retries. The chat handler clears after engine exits.
+                    if (target.conversationId && pendingImageBlocks.has(target.conversationId)) {
+                        const imgBlocks = pendingImageBlocks.get(target.conversationId);
+                        if (imgBlocks && imgBlocks.length > 0 && anthropicReq.messages) {
+                            // Find the last user message that has text (not just tool_result)
+                            for (let i = anthropicReq.messages.length - 1; i >= 0; i--) {
+                                const msg = anthropicReq.messages[i];
+                                if (msg.role !== 'user') continue;
+                                const parts = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: msg.content }];
+                                const hasToolResult = parts.some(b => b.type === 'tool_result');
+                                if (hasToolResult) continue; // Skip tool_result messages
+                                const existingContent = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: msg.content }];
+                                // Don't inject if images already present (re-injection on retry)
+                                if (existingContent.some(b => b.type === 'image')) break;
+                                msg.content = [...imgBlocks, ...existingContent];
+                                console.log('[Proxy] Injected', imgBlocks.length, 'image block(s) into user message');
+                                break;
+                            }
+                        }
+                    }
 
                     if (target.format === 'openai') {
                         // Convert Anthropic → OpenAI format
@@ -172,9 +200,10 @@ function initServer(mainWindow) {
                         }
                         for (const msg of (anthropicReq.messages || [])) {
                             if (msg.role === 'user') {
-                                // User messages may contain tool_result blocks
+                                // User messages may contain text, image, and tool_result blocks
                                 const parts = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: msg.content }];
                                 const textParts = parts.filter(b => b.type === 'text').map(b => b.text || '');
+                                const imageParts = parts.filter(b => b.type === 'image');
                                 const toolResults = parts.filter(b => b.type === 'tool_result');
                                 if (toolResults.length > 0) {
                                     for (const tr of toolResults) {
@@ -182,7 +211,18 @@ function initServer(mainWindow) {
                                         openaiMessages.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: trContent });
                                     }
                                 }
-                                if (textParts.join('').trim()) {
+                                if (imageParts.length > 0) {
+                                    // Build multimodal user message with text + images (OpenAI format)
+                                    const contentArray = [];
+                                    const joinedText = textParts.join('').trim();
+                                    if (joinedText) contentArray.push({ type: 'text', text: joinedText });
+                                    for (const img of imageParts) {
+                                        if (img.source && img.source.type === 'base64') {
+                                            contentArray.push({ type: 'image_url', image_url: { url: `data:${img.source.media_type};base64,${img.source.data}` } });
+                                        }
+                                    }
+                                    if (contentArray.length > 0) openaiMessages.push({ role: 'user', content: contentArray });
+                                } else if (textParts.join('').trim()) {
                                     openaiMessages.push({ role: 'user', content: textParts.join('') });
                                 }
                             } else if (msg.role === 'assistant') {
@@ -222,6 +262,25 @@ function initServer(mainWindow) {
                         };
                         if (openaiTools.length > 0) openaiBody.tools = openaiTools;
                         if (anthropicReq.temperature != null) openaiBody.temperature = anthropicReq.temperature;
+                        // Convert Anthropic thinking config → OpenAI-compatible thinking params
+                        // Qwen uses enable_thinking, DeepSeek uses similar pattern
+                        if (anthropicReq.thinking && anthropicReq.thinking.type === 'enabled') {
+                            // Check if previous turn had a tool error — models like qwen sometimes
+                            // put tool content into thinking instead of tool args, causing failures.
+                            // When we detect this pattern, disable thinking so the retry succeeds.
+                            let hasRecentToolError = false;
+                            for (const m of (anthropicReq.messages || [])) {
+                                const parts = Array.isArray(m.content) ? m.content : [];
+                                if (parts.some(b => b.type === 'tool_result' && b.is_error)) {
+                                    hasRecentToolError = true;
+                                }
+                            }
+                            if (hasRecentToolError) {
+                                console.log('[Proxy] Tool error detected in history — disabling thinking for this request to avoid thinking+tools confusion');
+                            } else {
+                                openaiBody.enable_thinking = true;
+                            }
+                        }
 
                         let endpoint = normalizeBaseUrl(target.baseUrl);
                         if (!endpoint.endsWith('/v1')) endpoint += '/v1';
@@ -268,6 +327,7 @@ function initServer(mainWindow) {
                         let totalTokens = 0;
                         let contentBlockIndex = 0;
                         let textBlockStarted = false;
+                        let thinkingBlockStarted = false;
                         // Track tool_calls being streamed (OpenAI streams them incrementally)
                         const pendingToolCalls = new Map(); // index → { id, name, args }
 
@@ -286,8 +346,27 @@ function initServer(mainWindow) {
                                     const delta = chunk.choices?.[0]?.delta;
                                     const finishReason = chunk.choices?.[0]?.finish_reason;
 
+                                    // Reasoning/thinking content (Qwen reasoning_content, DeepSeek etc.)
+                                    if (delta?.reasoning_content) {
+                                        if (!thinkingBlockStarted) {
+                                            res.write('event: content_block_start\ndata: ' + JSON.stringify({
+                                                type: 'content_block_start', index: contentBlockIndex, content_block: { type: 'thinking', thinking: '' }
+                                            }) + '\n\n');
+                                            thinkingBlockStarted = true;
+                                        }
+                                        res.write('event: content_block_delta\ndata: ' + JSON.stringify({
+                                            type: 'content_block_delta', index: contentBlockIndex, delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
+                                        }) + '\n\n');
+                                    }
+
                                     // Text content
                                     if (delta?.content) {
+                                        // Close thinking block before starting text block
+                                        if (thinkingBlockStarted) {
+                                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
+                                            contentBlockIndex++;
+                                            thinkingBlockStarted = false;
+                                        }
                                         if (!textBlockStarted) {
                                             res.write('event: content_block_start\ndata: ' + JSON.stringify({
                                                 type: 'content_block_start', index: contentBlockIndex, content_block: { type: 'text', text: '' }
@@ -351,6 +430,10 @@ function initServer(mainWindow) {
                         }
 
                         // Close any remaining open blocks
+                        if (thinkingBlockStarted) {
+                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
+                            contentBlockIndex++;
+                        }
                         if (textBlockStarted) {
                             res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
                         }
@@ -424,17 +507,19 @@ function initServer(mainWindow) {
                 console.log(`[Title] Generating (OpenAI) for ${conversationId} via ${endpoint} model=${modelId}`);
                 const titleController = new AbortController();
                 const titleTimeout = setTimeout(() => titleController.abort(), 30000);
+                const titleBody = {
+                    model: modelId,
+                    max_tokens: 200,
+                    enable_thinking: false,
+                    messages: [
+                        { role: 'system', content: 'You are a title generator. Respond only with the title, without any quotes or explanations. Maximum 5-7 words.' },
+                        { role: 'user', content: titlePrompt }
+                    ]
+                };
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Authorization': 'Bearer ' + token },
-                    body: JSON.stringify({
-                        model: modelId,
-                        max_tokens: 50,
-                        messages: [
-                            { role: 'system', content: 'You are a title generator. Respond only with the title, without any quotes or explanations. Maximum 5-7 words.' },
-                            { role: 'user', content: titlePrompt }
-                        ]
-                    }),
+                    body: JSON.stringify(titleBody),
                     signal: titleController.signal,
                 });
                 clearTimeout(titleTimeout);
@@ -808,9 +893,30 @@ function initServer(mainWindow) {
             } catch (e) {
                 contentStr = m.content;
             }
+            // Normalize attachment keys: DB stores camelCase, frontend expects snake_case
+            let attachments = m.attachments;
+            if (Array.isArray(attachments)) {
+                attachments = attachments.map(a => {
+                    const name = a.file_name || a.fileName || '';
+                    const ext = name.split('.').pop()?.toLowerCase() || '';
+                    const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'];
+                    const isImg = (a.file_type === 'image' || a.fileType === 'image')
+                        || (a.mime_type && a.mime_type.startsWith('image/'))
+                        || (a.mimeType && a.mimeType.startsWith('image/'))
+                        || imageExts.includes(ext);
+                    return {
+                        id: a.id || a.fileId || '',
+                        file_name: name || 'file',
+                        file_type: isImg ? 'image' : (a.file_type || a.fileType || 'document'),
+                        mime_type: a.mime_type || a.mimeType || (isImg ? 'image/' + (ext === 'jpg' ? 'jpeg' : ext) : ''),
+                        file_size: a.file_size || a.size || 0,
+                    };
+                });
+            }
             return {
                 ...m,
-                content: contentStr
+                content: contentStr,
+                attachments,
             };
         });
 
@@ -1887,10 +1993,9 @@ You have the following skills available. When a user's request matches a skill's
         };
 
         try {
-            // ── 1. Handle attachments & detect images ──
+            // ── 1. Handle attachments: copy to workspace, append references to prompt ──
             let finalPrompt = message;
-            const imageBlocks = []; // base64 image blocks for direct API (vision)
-            let hasImages = false;
+            const imageFileNames = []; // image files copied to workspace
 
             if (attachments && attachments.length > 0) {
                 const copiedFiles = [];
@@ -1909,29 +2014,40 @@ You have the following skills available. When a user's request matches a skill's
                         const fn = att.fileName || path.basename(srcPath);
                         try { fs.copyFileSync(srcPath, path.join(conv.workspace_path, fn)); copiedFiles.push(fn); } catch (_) {}
 
-                        // Detect images → prepare base64 for vision API
+                        // Detect images → read base64 for proxy injection
                         const ext = path.extname(fn).toLowerCase();
                         if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
+                            console.log('[Chat] Image copied to workspace:', fn);
+                            imageFileNames.push(fn);
                             try {
                                 const imgData = fs.readFileSync(srcPath);
-                                if (imgData.length > 100) { // Skip empty/corrupt files
-                                    hasImages = true;
+                                if (imgData.length > 100) {
                                     const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-                                    imageBlocks.push({
+                                    if (!pendingImageBlocks.has(conversation_id)) pendingImageBlocks.set(conversation_id, []);
+                                    pendingImageBlocks.get(conversation_id).push({
                                         type: 'image',
                                         source: { type: 'base64', media_type: mimeMap[ext] || 'image/png', data: imgData.toString('base64') }
                                     });
-                                    console.log('[Chat] Image loaded:', fn, imgData.length, 'bytes');
-                                } else {
-                                    console.warn('[Chat] Skipping empty image:', fn, imgData.length, 'bytes');
+                                    console.log('[Chat] Image queued for proxy injection:', fn, imgData.length, 'bytes');
                                 }
                             } catch (_) {}
                         }
                     }
                 }
-                if (copiedFiles.length > 0 && !hasImages) {
-                    finalPrompt += '\n\n[Attached files in workspace — read only when needed:]\n';
-                    for (const fn of copiedFiles) finalPrompt += `- ./${fn}\n`;
+                if (copiedFiles.length > 0) {
+                    // Images are injected directly into the API request via the proxy,
+                    // but we also mention them here so the model knows they exist as files.
+                    if (imageFileNames.length > 0) {
+                        finalPrompt += '\n\n[The user attached image(s): ' + imageFileNames.join(', ') + '. The image(s) are included in this message — you can see them directly.]';
+                        const nonImages = copiedFiles.filter(f => !imageFileNames.includes(f));
+                        if (nonImages.length > 0) {
+                            finalPrompt += '\n[Other attached files — read only when needed:]\n';
+                            for (const fn of nonImages) finalPrompt += `- ./${fn}\n`;
+                        }
+                    } else {
+                        finalPrompt += '\n\n[Attached files in workspace — read only when needed:]\n';
+                        for (const fn of copiedFiles) finalPrompt += `- ./${fn}\n`;
+                    }
                 }
             }
 
@@ -1978,7 +2094,7 @@ You have the following skills available. When a user's request matches a skill's
                 }
             }
 
-            // ── 4. Determine mode: images → direct API, text → Claude Code engine ──
+            // ── 4. Resolve provider & launch Claude Code engine (unified for all messages) ──
             const rawModel = conv.model || 'claude-sonnet-4-6';
             const modelId = rawModel.replace(/-thinking$/, '');
 
@@ -1998,73 +2114,7 @@ You have the following skills available. When a user's request matches a skill's
                 console.log('[Chat] Key source:', validToken ? 'user' : engineEnvVars.ANTHROPIC_API_KEY ? 'engine-env' : 'process-env', '| baseUrl:', baseUrl);
             }
 
-            // ── 4a. IMAGE MODE: Vision via Bun subprocess (Node.js in Electron can't connect) ──
-            if (hasImages) {
-                console.log('[Chat] Image detected, using Bun vision helper');
-                const cleanBase = baseUrl ? normalizeBaseUrl(baseUrl) : null;
-                const endpoint = cleanBase ? (cleanBase.endsWith('/v1') ? `${cleanBase}/messages` : `${cleanBase}/v1/messages`) : 'https://api.anthropic.com/v1/messages';
-                const userContent = [...imageBlocks, { type: 'text', text: message }];
-                const apiBody = { model: modelId, system: sysPrompt || undefined, messages: [{ role: 'user', content: userContent }], max_tokens: 8192, stream: true };
-
-                // Write request to temp file (too large for CLI args)
-                const tmpFile = path.join(conv.workspace_path, '.vision_req.json');
-                fs.writeFileSync(tmpFile, JSON.stringify({ endpoint, apiKey, body: apiBody }));
-
-                const visionHelper = path.join(engineDir, 'vision-helper.ts');
-                const bunExe = bunExePath;
-
-                console.log('[Chat] Vision request:', endpoint, 'body size:', fs.statSync(tmpFile).size, 'bytes');
-                const { spawn } = require('child_process');
-                const vChild = spawn(bunExe, [visionHelper, tmpFile], {
-                    cwd: conv.workspace_path,
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                });
-                vChild.stdin.end();
-
-                let assistantText = '';
-                let vBuf = '';
-                vChild.stdout.on('data', (chunk) => {
-                    vBuf += chunk.toString('utf8');
-                    const lines = vBuf.split('\n');
-                    vBuf = lines.pop() || '';
-                    for (const line of lines) {
-                        if (!line.trim()) continue;
-                        let parsed;
-                        try { parsed = JSON.parse(line); } catch { continue; }
-                        if (parsed.type === 'error') {
-                            sendSSE({ type: 'error', error: parsed.error });
-                        } else if (parsed.type === 'content_block_delta' && parsed.delta && parsed.delta.type === 'text_delta') {
-                            assistantText += parsed.delta.text;
-                            sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: parsed.delta.text } });
-                        } else if (parsed.type === 'content_block_delta' && parsed.delta && parsed.delta.type === 'thinking_delta') {
-                            sendSSE({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: parsed.delta.thinking } });
-                        }
-                    }
-                });
-
-                let vStderr = '';
-                vChild.stderr.on('data', (c) => { vStderr += c.toString('utf8'); });
-
-                await new Promise((resolve, reject) => {
-                    vChild.on('close', (code) => {
-                        try { fs.unlinkSync(tmpFile); } catch (_) {}
-                        if (code !== 0 && !assistantText) reject(new Error(vStderr || 'Vision helper failed'));
-                        else resolve();
-                    });
-                    vChild.on('error', reject);
-                });
-
-                if (assistantText) {
-                    db.messages.push({ id: uuidv4(), conversation_id, role: 'assistant', content: JSON.stringify([{ type: 'text', text: assistantText }]), created_at: new Date().toISOString() });
-                    saveDb();
-                    generateTitleAsync(conversation_id, message.slice(0, 300), assistantText.slice(0, 300), apiKey, baseUrl, conv.model, apiFormat);
-                }
-                sendSSE({ type: 'message_stop' });
-                endStream(conversation_id);
-                return;
-            }
-
-            // ── 4b. TEXT MODE: Claude Code engine via Bun CLI ──
+            // ── All messages go through the Claude Code engine (no separate vision path) ──
 
             const cliArgs = [
                 '--preload', enginePreload,
@@ -2082,7 +2132,7 @@ You have the following skills available. When a user's request matches a skill's
             const envVars = Object.assign({}, process.env);
             if (apiFormat === 'openai' && proxyPort > 0) {
                 // OpenAI provider: route engine through local conversion proxy
-                proxyTarget = { apiKey, baseUrl, model: modelId, format: 'openai' };
+                proxyTarget = { apiKey, baseUrl, model: modelId, format: 'openai', conversationId: conversation_id };
                 envVars.ANTHROPIC_API_KEY = 'proxy-key'; // engine needs a non-empty key
                 envVars.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + proxyPort + '/v1';
                 console.log('[Engine] Routing through OpenAI proxy, model=' + modelId + ' provider=' + (provider ? provider.name : '?'));
@@ -2107,6 +2157,9 @@ You have the following skills available. When a user's request matches a skill's
             // ── 5. Parse stream-json and forward to frontend ──
             let assistantText = '';
             let thinkingText = '';
+            let lastToolDoneTextLen = 0; // text length when last tool result arrives
+            let pendingWorkText = ''; // text accumulated since last tool event (for interleaving)
+            const toolCallOrder = []; // ordered list of tool IDs for timeline reconstruction
             const toolCalls = new Map();
             const sentToolStarts = new Set(); // track which tool_use_start we already sent
             const writtenFiles = new Map(); // deduplicate Write tool results by file path
@@ -2154,6 +2207,7 @@ You have the following skills available. When a user's request matches a skill's
                         if (se.type === 'content_block_delta') {
                             if (se.delta && se.delta.type === 'text_delta') {
                                 assistantText += se.delta.text;
+                                pendingWorkText += se.delta.text;
                                 sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: se.delta.text } });
                             } else if (se.delta && se.delta.type === 'thinking_delta') {
                                 thinkingText += se.delta.thinking;
@@ -2163,7 +2217,10 @@ You have the following skills available. When a user's request matches a skill's
                         // Track tool_use start from stream (don't send yet — wait for full input from assistant event)
                         else if (se.type === 'content_block_start' && se.content_block && se.content_block.type === 'tool_use') {
                             var tu = se.content_block;
-                            toolCalls.set(tu.id, { id: tu.id, name: tu.name, input: {}, status: 'running' });
+                            // Capture text that appeared before this tool call
+                            toolCalls.set(tu.id, { id: tu.id, name: tu.name, input: {}, status: 'running', textBefore: pendingWorkText.trim() });
+                            toolCallOrder.push(tu.id);
+                            pendingWorkText = '';
                             // Don't send tool_use_start here — input is empty. Wait for 'assistant' event with full input.
                         }
                     }
@@ -2172,7 +2229,15 @@ You have the following skills available. When a user's request matches a skill's
                         for (var block of evt.message.content) {
                             if (block.type === 'tool_use') {
                                 var tc = toolCalls.get(block.id);
-                                if (tc) tc.input = block.input;
+                                if (tc) {
+                                    tc.input = block.input;
+                                } else {
+                                    // Tool not seen via content_block_start — register now with pending text
+                                    tc = { id: block.id, name: block.name, input: block.input, status: 'running', textBefore: pendingWorkText.trim() };
+                                    toolCalls.set(block.id, tc);
+                                    toolCallOrder.push(block.id);
+                                    pendingWorkText = '';
+                                }
                                 // WebSearch: emit status event instead of tool_use_start
                                 if (block.name === 'WebSearch' && !sentToolStarts.has(block.id)) {
                                     sentToolStarts.add(block.id);
@@ -2210,6 +2275,8 @@ You have the following skills available. When a user's request matches a skill's
                                 if (typeof cb.content === 'string') trText = cb.content;
                                 else if (Array.isArray(cb.content)) trText = cb.content.map(function(x) { return x.text || ''; }).join('');
                                 if (tc3) { tc3.status = cb.is_error ? 'error' : 'done'; tc3.result = trText; }
+                                // Record text offset after each tool completes — used to split work text vs final text
+                                lastToolDoneTextLen = assistantText.length;
 
                                 // WebSearch: parse result text and emit search_sources
                                 if (tn === 'WebSearch' && trText) {
@@ -2334,9 +2401,30 @@ You have the following skills available. When a user's request matches a skill's
             await new Promise(function(resolve, reject) {
                 child.on('close', function(code) {
                     activeChildren.delete(conversation_id);
-                    if (buf.trim()) { try { var e = JSON.parse(buf); if (!assistantText && e.result) assistantText = typeof e.result === 'string' ? e.result : ''; } catch(x) {} }
-                    if (code !== 0 && !assistantText) reject(new Error(stderrBuf || 'Engine exit ' + code));
-                    else resolve();
+                    // Process remaining buffer
+                    if (buf.trim()) {
+                        try {
+                            var lastEvt = JSON.parse(buf);
+                            if (lastEvt.type === 'stream_event' && lastEvt.event && lastEvt.event.delta && lastEvt.event.delta.type === 'text_delta') {
+                                assistantText += lastEvt.event.delta.text;
+                                sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: lastEvt.event.delta.text } });
+                            } else if (!assistantText && lastEvt.result) {
+                                assistantText = typeof lastEvt.result === 'string' ? lastEvt.result : '';
+                            }
+                        } catch(x) {}
+                    }
+                    if (code !== 0) {
+                        console.error('[Engine] Exited with code', code, '| stderr:', stderrBuf.slice(0, 500));
+                        if (!assistantText) {
+                            reject(new Error(stderrBuf || 'Engine exit ' + code));
+                        } else {
+                            // Engine failed mid-response — show the error after partial text
+                            sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: '\n\n⚠️ Engine exited unexpectedly (code ' + code + '). The response may be incomplete.' } });
+                            resolve();
+                        }
+                    } else {
+                        resolve();
+                    }
                 });
                 child.on('error', function(err) { activeChildren.delete(conversation_id); reject(err); });
             });
@@ -2348,16 +2436,24 @@ You have the following skills available. When a user's request matches a skill's
                     content: JSON.stringify([{ type: 'text', text: assistantText }]),
                     created_at: new Date().toISOString(),
                     thinking: thinkingText || undefined,
-                    toolCalls: toolCalls.size > 0 ? Array.from(toolCalls.values()) : undefined,
+                    toolCalls: toolCalls.size > 0 ? toolCallOrder.map(id => toolCalls.get(id)).filter(Boolean) : undefined,
+                    toolTextEndOffset: (toolCalls.size > 0 && lastToolDoneTextLen > 0) ? lastToolDoneTextLen : undefined,
                     searchLogs: searchLogs.length > 0 ? searchLogs : undefined,
                 });
                 saveDb();
                 generateTitleAsync(conversation_id, message.slice(0, 300), assistantText.slice(0, 300), apiKey, baseUrl, conv.model, apiFormat);
             }
 
+            // Send the text offset so frontend knows where work text ends and final text begins
+            if (toolCalls.size > 0 && lastToolDoneTextLen > 0) {
+                sendSSE({ type: 'tool_text_offset', offset: lastToolDoneTextLen });
+            }
+            // Clean up pending images for this conversation
+            pendingImageBlocks.delete(conversation_id);
             sendSSE({ type: 'message_stop' });
             endStream(conversation_id);
         } catch (err) {
+            pendingImageBlocks.delete(conversation_id);
             console.error('[Chat] Error:', (err.message || '').slice(0, 300));
             sendSSE({ type: 'error', error: err.message || 'Engine error' });
             endStream(conversation_id);
