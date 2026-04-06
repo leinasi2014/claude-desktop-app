@@ -932,11 +932,10 @@ function initServer(mainWindow) {
 
         if (req.body.title) conv.title = req.body.title;
         if (req.body.model && req.body.model !== conv.model) {
+            console.log('[Session] Model changed for conv', conv.id, ':', conv.model, '→', req.body.model, '(session preserved)');
             conv.model = req.body.model;
-            // Model changed — reset engine session so next message starts fresh with new model
-            // (engine sessions are model-bound; resuming with a different model causes context loss)
-            conv.claude_session_id = null;
-            console.log('[Session] Reset for conv', conv.id, '(model changed to', conv.model + ')');
+            // Don't reset claude_session_id — engine sessions store message history
+            // which is model-agnostic. The engine can resume with a different model.
         }
         // Move conversation to/from a project
         if ('project_id' in req.body) {

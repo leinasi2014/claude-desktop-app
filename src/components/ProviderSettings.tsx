@@ -597,7 +597,7 @@ const ProviderSettings: React.FC = () => {
                   );
                 })()}
                 <div className="flex gap-2 pt-2">
-                  <button onClick={handleQuickAdd} className="px-4 py-2 text-[14px] font-medium text-white bg-claude-text rounded-lg transition-colors hover:opacity-90">
+                  <button onClick={handleQuickAdd} className="px-4 py-2 text-[14px] font-medium text-claude-bg bg-claude-text rounded-lg transition-colors hover:opacity-90">
                     添加
                   </button>
                   <button onClick={() => { setShowAdd(false); setNewUrl(''); setNewKey(''); }} className="px-4 py-2 text-[14px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-lg transition-colors">
