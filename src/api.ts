@@ -723,7 +723,7 @@ export function reconnectStream(
               }
             }
             if (parsed.type === 'tool_use_start' && onToolUse) {
-              onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input });
+              onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '' });
             }
             if (parsed.type === 'tool_use_done' && onToolUse) {
               onToolUse({ type: 'done', tool_use_id: parsed.tool_use_id, content: parsed.content, is_error: parsed.is_error });

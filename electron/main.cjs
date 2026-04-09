@@ -20,8 +20,8 @@ const isDev = process.env.NODE_ENV === 'development';
 
 function createWindow() {
     mainWindow = new BrowserWindow({
-        width: 1300,
-        height: 780,
+        width: 1150,
+        height: 700,
         minWidth: 800,
         minHeight: 600,
         webPreferences: {

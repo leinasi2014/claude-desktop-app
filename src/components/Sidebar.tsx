@@ -420,8 +420,8 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
               />
             </div>
             <span
-              className={`font-medium leading-none transition-opacity duration-200 text-left ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100 block'}`}
-              style={{ fontSize: '14px' }}
+              className={`leading-none transition-opacity duration-200 text-left ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100 block'}`}
+              style={{ fontSize: '14px', fontWeight: 400 }}
             >
               New chat
             </span>
@@ -457,8 +457,8 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
               />
             </div>
             <span
-              className={`font-medium leading-none transition-opacity duration-200 text-left ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100 block'}`}
-              style={{ fontSize: '14px' }}
+              className={`leading-none transition-opacity duration-200 text-left ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100 block'}`}
+              style={{ fontSize: '14px', fontWeight: 400 }}
             >
               Search
             </span>
@@ -494,8 +494,8 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
               />
             </div>
             <span
-              className={`font-medium leading-none transition-opacity duration-200 text-left ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100 block'}`}
-              style={{ fontSize: '14px' }}
+              className={`leading-none transition-opacity duration-200 text-left ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100 block'}`}
+              style={{ fontSize: '14px', fontWeight: 400 }}
             >
               Customize
             </span>
@@ -519,7 +519,8 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
               <button
                 key={item.label}
                 onClick={() => handleNavClick(item.label)}
-                className={`w-full flex items-center justify-start text-claude-text hover:bg-claude-hover rounded-lg transition-colors font-medium group overflow-hidden whitespace-nowrap ${(location.pathname === '/chats' && item.label === 'Chats') || (location.pathname === '/projects' && item.label === 'Projects') ? 'bg-claude-hover' : ''}`}
+                className={`w-full flex items-center justify-start text-claude-text hover:bg-claude-hover rounded-lg transition-colors group overflow-hidden whitespace-nowrap ${(location.pathname === '/chats' && item.label === 'Chats') || (location.pathname === '/projects' && item.label === 'Projects') ? 'bg-claude-hover' : ''}`}
+                style={{ fontWeight: 400 }}
                 style={{
                   paddingTop: '2px',
                   paddingBottom: '2px',
@@ -563,7 +564,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
 
           {/* Recents List */}
           <div className={`space-y-0.5 pb-2 transition-all duration-200 ${isCollapsed || isRecentsCollapsed ? 'opacity-0 hidden h-0 overflow-hidden' : 'opacity-100'}`}>
-            {chats.map((chat, index) => {
+            {chats.slice(0, 30).map((chat, index) => {
               const isActive = location.pathname === `/chat/${chat.id}`;
               return (
                 <div
@@ -616,6 +617,20 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
                 </div>
               );
             })}
+            {chats.length > 30 && (
+              <button
+                onClick={() => { onCloseOverlays?.(); navigate('/chats'); }}
+                className="w-full flex items-center gap-2 rounded-lg hover:bg-claude-hover transition-colors text-claude-textSecondary hover:text-claude-text"
+                style={{
+                  paddingTop: `${tunerConfig?.recentsItemPy || 6}px`,
+                  paddingBottom: `${tunerConfig?.recentsItemPy || 6}px`,
+                  paddingLeft: `${tunerConfig?.recentsPl || 12}px`,
+                }}
+              >
+                <IconDotsHorizontal size={18} className="opacity-60" />
+                <span style={{ fontSize: `${tunerConfig?.recentsFontSize || 13}px` }} className="leading-tight">All chats</span>
+              </button>
+            )}
           </div>
 
         </div>

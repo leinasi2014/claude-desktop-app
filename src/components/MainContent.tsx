@@ -1529,7 +1529,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   const lastMsg = newMsgs[newMsgs.length - 1];
                   if (!lastMsg || lastMsg.role !== 'assistant') return prev;
                   const toolCalls = lastMsg.toolCalls || [];
-                  if (toolEvent.type === 'start') toolCalls.push({ id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: toolEvent.tool_input, status: 'running' as const });
+                  if (toolEvent.type === 'start') toolCalls.push({ id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: toolEvent.tool_input, status: 'running' as const, textBefore: toolEvent.textBefore || '' });
                   else if (toolEvent.type === 'done') {
                     let tc = toolCalls.find((t: any) => t.id === toolEvent.tool_use_id);
                     if (!tc) { tc = { id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: {}, status: 'done' as const, result: toolEvent.content }; toolCalls.push(tc); }
@@ -2318,6 +2318,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               name: toolEvent.tool_name || 'unknown',
               input: toolEvent.tool_input,
               status: 'running' as const,
+              textBefore: toolEvent.textBefore || '',
             });
           } else if (toolEvent.type === 'done') {
             let tc = toolCalls.find((t: any) => t.id === toolEvent.tool_use_id);

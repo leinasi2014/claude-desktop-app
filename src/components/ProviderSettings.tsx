@@ -86,7 +86,14 @@ const TIER_DEFS: { key: 'opus' | 'sonnet' | 'haiku'; label: string; description:
 ];
 
 function loadChatModels(): ChatModel[] {
-  try { return JSON.parse(localStorage.getItem('chat_models') || '[]'); } catch { return []; }
+  try {
+    const raw: ChatModel[] = JSON.parse(localStorage.getItem('chat_models') || '[]');
+    // Migrate legacy entries without a tier to 'extra' so they are visible and don't ghost-block tier dropdowns
+    let migrated = false;
+    for (const m of raw) { if (!m.tier) { m.tier = 'extra'; migrated = true; } }
+    if (migrated) localStorage.setItem('chat_models', JSON.stringify(raw));
+    return raw;
+  } catch { return []; }
 }
 function saveChatModels(models: ChatModel[]) {
   localStorage.setItem('chat_models', JSON.stringify(models));
@@ -190,6 +197,8 @@ const ProviderSettings: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showKeyMap, setShowKeyMap] = useState<Record<string, boolean>>({});
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelPage, setModelPage] = useState(0);
+  const MODELS_PER_PAGE = 10;
   const [defaultModel, setDefaultModel] = useState(localStorage.getItem('default_model') || '');
   const [chatModels, setChatModels] = useState<ChatModel[]>(loadChatModels());
 
@@ -229,8 +238,8 @@ const ProviderSettings: React.FC = () => {
     setNewUrl('');
     setNewKey('');
 
-    // For unknown providers, auto-probe: try fetching models
-    if (!detected && key) {
+    // Auto-probe: fetch models from /v1/models endpoint for all providers
+    if (key) {
       try {
         let endpoint = url.replace(/\/+$/, '').replace(/\/(chat\/completions|messages)$/, '').replace(/\/+$/, '');
         if (!endpoint.endsWith('/v1')) endpoint += '/v1';
@@ -239,7 +248,6 @@ const ProviderSettings: React.FC = () => {
           const data = await res.json();
           const models = (data.data || [])
             .filter((m: any) => m.id && typeof m.id === 'string')
-            .slice(0, 50)
             .map((m: any) => ({ id: m.id, name: m.id, enabled: true }));
           if (models.length > 0) {
             await updateProvider(p.id, { models });
@@ -294,7 +302,9 @@ const ProviderSettings: React.FC = () => {
           .filter((m: any) => m.id && typeof m.id === 'string')
           .map((m: any) => ({ id: m.id, name: m.id, enabled: true }));
         if (models.length > 0) {
-          handleUpdate(p.id, { models });
+          await handleUpdate(p.id, { models });
+          // Re-load full provider list to ensure allAvailableModels is up-to-date
+          await loadProviders();
         }
       }
     } catch (_) { }
@@ -386,8 +396,8 @@ const ProviderSettings: React.FC = () => {
           {TIER_DEFS.map(tier => {
             const assigned = chatModels.find(cm => cm.tier === tier.key);
             const assignedIsDefault = assigned && defaultModel === assigned.id;
-            // Models available for this tier (not already assigned to another tier)
-            const usedIds = new Set(chatModels.filter(cm => cm.tier !== tier.key).map(cm => cm.id));
+            // Models available for this tier (not already assigned to another tier; ignore tierless entries)
+            const usedIds = new Set(chatModels.filter(cm => cm.tier && cm.tier !== tier.key).map(cm => cm.id));
             const available = allAvailableModels.filter(m => !usedIds.has(m.id) && !m.id.endsWith('-thinking'));
             return (
               <div key={tier.key} className={`rounded-[12px] border transition-colors ${assigned ? (assignedIsDefault ? 'bg-[#387ee0]/5 border-[#387ee0]/40' : 'bg-black/[0.02] dark:bg-white/[0.02] border-claude-border') : 'border-dashed border-claude-border/40'}`}>
@@ -414,25 +424,8 @@ const ProviderSettings: React.FC = () => {
                           emptyLabel="未分配"
                         />
                       </div>
-                      {assigned && (
-                        assigned.thinkingId ? (
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 flex-shrink-0">Extended</span>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              const tid = prompt('输入 Extended Thinking 模型 ID（留空则无）', assigned.id + '-thinking');
-                              if (tid !== null) {
-                                const updated = chatModels.map(c => c.id === assigned.id ? { ...c, thinkingId: tid.trim() || undefined } : c);
-                                setChatModels(updated);
-                                saveChatModels(updated);
-                              }
-                            }}
-                            className="text-[9px] px-1.5 py-0.5 rounded text-claude-textSecondary/30 hover:text-amber-500 hover:bg-amber-500/10 transition-colors flex-shrink-0"
-                            title="配置 Extended Thinking 模型"
-                          >
-                            + Thinking
-                          </button>
-                        )
+                      {assigned && assigned.thinkingId && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 flex-shrink-0">Thinking</span>
                       )}
                     </div>
                   </div>
@@ -472,23 +465,8 @@ const ProviderSettings: React.FC = () => {
                           />
                           <span className="text-[11px] text-claude-textSecondary/50 truncate">{cm.providerName}</span>
                         </div>
-                        {cm.thinkingId ? (
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 flex-shrink-0">Extended</span>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              const tid = prompt('输入 Extended Thinking 模型 ID（留空则无）', cm.id + '-thinking');
-                              if (tid !== null) {
-                                const updated = chatModels.map(c => c.id === cm.id ? { ...c, thinkingId: tid.trim() || undefined } : c);
-                                setChatModels(updated);
-                                saveChatModels(updated);
-                              }
-                            }}
-                            className="text-[9px] px-1.5 py-0.5 rounded text-claude-textSecondary/30 hover:text-amber-500 hover:bg-amber-500/10 transition-colors flex-shrink-0"
-                            title="配置 Extended Thinking"
-                          >
-                            + Thinking
-                          </button>
+                        {cm.thinkingId && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 flex-shrink-0">Thinking</span>
                         )}
                         <button onClick={() => handleRemoveChatModel(cm.id)} className="p-0.5 text-claude-textSecondary/20 hover:text-red-400 transition-colors">
                           <X size={12} />
@@ -542,7 +520,7 @@ const ProviderSettings: React.FC = () => {
               return (
                 <button
                   key={p.id}
-                  onClick={() => setSelectedId(p.id)}
+                  onClick={() => { setSelectedId(p.id); setModelPage(0); }}
                   className={`w-full flex items-center gap-3 px-3 py-3 rounded-[12px] transition-colors text-left border ${isActive ? 'bg-claude-input border-claude-border shadow-sm' : 'border-transparent hover:bg-claude-hover/80'
                     }`}
                 >
@@ -720,12 +698,12 @@ const ProviderSettings: React.FC = () => {
                       </button>
                     </div>
                   </div>
-                  <div className="space-y-0.5 overflow-y-auto max-h-[360px] pr-2 -mr-2">
-                    {(selected.models || []).map((m, mi) => {
-                      const isDefault = defaultModel === m.id;
+                  <div className="space-y-0.5 pr-2 -mr-2">
+                    {(selected.models || []).slice(modelPage * MODELS_PER_PAGE, (modelPage + 1) * MODELS_PER_PAGE).map((m, _pi) => {
+                      const mi = modelPage * MODELS_PER_PAGE + _pi; // real index in full array
                       const hasThinking = (selected.models || []).some(x => x.id === m.id + '-thinking') || m.id.endsWith('-thinking');
                       return (
-                        <div key={mi} className={`flex items-center gap-2 group rounded-lg px-2 py-1.5 -mx-2 transition-colors ${isDefault ? 'bg-claude-hover/50' : 'hover:bg-claude-hover/50'}`}>
+                        <div key={mi} className="flex items-center gap-2 group rounded-lg px-2 py-1.5 -mx-2 transition-colors hover:bg-claude-hover/50">
                           <button
                             onClick={() => {
                               const models = [...(selected.models || [])];
@@ -766,18 +744,6 @@ const ProviderSettings: React.FC = () => {
                           )}
                           <button
                             onClick={() => {
-                              const newDefault = isDefault ? '' : m.id;
-                              setDefaultModel(newDefault);
-                              localStorage.setItem('default_model', newDefault);
-                            }}
-                            className={`text-[9px] px-1.5 py-0.5 rounded flex-shrink-0 transition-colors ${isDefault ? 'bg-[#387ee0]/15 text-[#387ee0] font-medium' : 'text-claude-textSecondary/0 group-hover:text-claude-textSecondary/40 hover:!text-[#387ee0] hover:!bg-[#387ee0]/10'
-                              }`}
-                            title={isDefault ? '当前默认模型' : '设为默认'}
-                          >
-                            {isDefault ? '默认' : '设为默认'}
-                          </button>
-                          <button
-                            onClick={() => {
                               const models = (selected.models || []).filter((_, i) => i !== mi);
                               handleUpdate(selected.id, { models });
                             }}
@@ -790,6 +756,23 @@ const ProviderSettings: React.FC = () => {
                     })}
                     {(!selected.models || selected.models.length === 0) && (
                       <div className="text-[12px] text-claude-textSecondary/40 py-2">暂无模型 — 点击「获取模型列表」自动拉取，或手动添加。</div>
+                    )}
+                    {(selected.models || []).length > MODELS_PER_PAGE && (
+                      <div className="flex items-center justify-between pt-2 mt-1 border-t border-claude-border/30">
+                        <button
+                          onClick={() => setModelPage(p => Math.max(0, p - 1))}
+                          disabled={modelPage === 0}
+                          className="text-[11px] px-2 py-1 rounded text-claude-textSecondary hover:bg-claude-hover disabled:opacity-30 disabled:cursor-default transition-colors"
+                        >← 上一页</button>
+                        <span className="text-[11px] text-claude-textSecondary/50">
+                          {modelPage + 1} / {Math.ceil((selected.models || []).length / MODELS_PER_PAGE)}
+                        </span>
+                        <button
+                          onClick={() => setModelPage(p => Math.min(Math.ceil((selected.models || []).length / MODELS_PER_PAGE) - 1, p + 1))}
+                          disabled={modelPage >= Math.ceil((selected.models || []).length / MODELS_PER_PAGE) - 1}
+                          className="text-[11px] px-2 py-1 rounded text-claude-textSecondary hover:bg-claude-hover disabled:opacity-30 disabled:cursor-default transition-colors"
+                        >下一页 →</button>
+                      </div>
                     )}
                   </div>
                 </div>

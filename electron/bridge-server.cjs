@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
@@ -8,9 +8,9 @@ const { v4: uuidv4 } = require('uuid');
 const { app } = require('electron');
 const { TOOL_DEFINITIONS, executeTool } = require('./tools.cjs');
 
-// No longer needed — SDK removed, using direct API calls
+// No longer needed 鈥?SDK removed, using direct API calls
 function enableNodeModeForChildProcesses() {
-    console.log('[Engine] Direct API mode — no SDK subprocess needed');
+    console.log('[Engine] Direct API mode 鈥?no SDK subprocess needed');
 }
 
 // Load custom system prompt (only affects this Electron app, not external CLI usage)
@@ -35,7 +35,7 @@ try {
 function initServer(mainWindow) {
     const server = express();
     server.use(cors());
-    server.use(express.json());
+    server.use(express.json({ limit: '5mb' }));
 
     // Track active engine child processes per conversation (for stdin writes like AskUserQuestion)
     const activeChildren = new Map();
@@ -74,6 +74,93 @@ function initServer(mainWindow) {
         stream.listeners.clear();
         // Keep buffer for 30s so frontend can still reconnect after slight delay
         setTimeout(() => { if (activeStreams.get(conversationId) === stream) activeStreams.delete(conversationId); }, 30000);
+    }
+    function consumeSSEPayloads(buffer) {
+        const normalized = String(buffer || '').replace(/\r\n/g, '\n');
+        const parts = normalized.split('\n\n');
+        const remainder = parts.pop() || '';
+        const payloads = [];
+        for (const part of parts) {
+            const dataLines = [];
+            for (const rawLine of part.split('\n')) {
+                if (!rawLine.startsWith('data:')) continue;
+                dataLines.push(rawLine.slice(5).replace(/^ /, ''));
+            }
+            if (dataLines.length > 0) payloads.push(dataLines.join('\n').trim());
+        }
+        return { payloads, remainder };
+    }
+    function decodeLooseJsonString(value) {
+        if (typeof value !== 'string') return '';
+        try { return JSON.parse('"' + value.replace(/\r/g, '\\r').replace(/\n/g, '\\n') + '"'); } catch (_) { return value; }
+    }
+    function extractLooseJsonStringField(raw, fieldName, allowTruncated) {
+        if (!raw) return null;
+        const escapedField = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp('"' + escapedField + '"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"', 's');
+        const match = raw.match(pattern);
+        if (match) return decodeLooseJsonString(match[1]);
+        if (allowTruncated) {
+            const openPattern = new RegExp('"' + escapedField + '"\\s*:\\s*"');
+            const openMatch = raw.match(openPattern);
+            if (openMatch) {
+                const startIdx = openMatch.index + openMatch[0].length;
+                let truncated = raw.slice(startIdx);
+                // Strip trailing incomplete escape sequence (odd number of backslashes)
+                truncated = truncated.replace(/\\+$/, (m) => m.length % 2 === 0 ? m : m.slice(0, -1));
+                if (truncated.length > 0) return decodeLooseJsonString(truncated);
+            }
+        }
+        return null;
+    }
+    function extractLooseJsonBooleanField(raw, fieldName) {
+        if (!raw) return null;
+        const pattern = new RegExp('"' + fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"\\s*:\\s*(true|false)', 'i');
+        const match = raw.match(pattern);
+        if (!match) return null;
+        return String(match[1]).toLowerCase() === 'true';
+    }
+    function extractLooseJsonNumberField(raw, fieldName) {
+        if (!raw) return null;
+        const pattern = new RegExp('"' + fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)', 'i');
+        const match = raw.match(pattern);
+        if (!match) return null;
+        const num = Number(match[1]);
+        return Number.isFinite(num) ? num : null;
+    }
+    function recoverMalformedToolInput(toolName, rawArgs) {
+        if (!rawArgs || typeof rawArgs !== 'string') return null;
+        try { return JSON.parse(rawArgs); } catch (_) {}
+        if (toolName === 'Write') {
+            const filePath = extractLooseJsonStringField(rawArgs, 'file_path');
+            const content = extractLooseJsonStringField(rawArgs, 'content', true);
+            if (filePath != null && content != null) return { file_path: filePath, content };
+            return null;
+        }
+        if (toolName === 'Edit') {
+            const filePath = extractLooseJsonStringField(rawArgs, 'file_path');
+            const oldString = extractLooseJsonStringField(rawArgs, 'old_string');
+            const newString = extractLooseJsonStringField(rawArgs, 'new_string');
+            const replaceAll = extractLooseJsonBooleanField(rawArgs, 'replace_all');
+            if (filePath != null && oldString != null && newString != null) {
+                return { file_path: filePath, old_string: oldString, new_string: newString, replace_all: replaceAll === true };
+            }
+            return null;
+        }
+        if (toolName === 'Read') {
+            const filePath = extractLooseJsonStringField(rawArgs, 'file_path');
+            const offset = extractLooseJsonNumberField(rawArgs, 'offset');
+            const limit = extractLooseJsonNumberField(rawArgs, 'limit');
+            if (filePath != null) return { file_path: filePath, offset: offset == null ? undefined : offset, limit: limit == null ? undefined : limit };
+            return null;
+        }
+        if (toolName === 'Bash') {
+            const command = extractLooseJsonStringField(rawArgs, 'command', true);
+            const timeout = extractLooseJsonNumberField(rawArgs, 'timeout');
+            if (command != null) return { command, timeout: timeout == null ? undefined : timeout };
+            return null;
+        }
+        return null;
     }
 
     // Setup paths
@@ -138,7 +225,7 @@ function initServer(mainWindow) {
                 }
             }
         }
-        if (match) console.log('[Provider] Resolved "' + modelId + '" → "' + match.name + '" (' + match.baseUrl + ')');
+        if (match) console.log('[Provider] Resolved "' + modelId + '" 鈫?"' + match.name + '" (' + match.baseUrl + ')');
         else console.log('[Provider] No provider found for "' + modelId + '"');
         return match;
     }
@@ -153,7 +240,223 @@ function initServer(mainWindow) {
         return clean.replace(/\/+$/, '');
     }
 
-    // ===== OpenAI→Anthropic Conversion Proxy =====
+    // ===== Proxy-level Web Search for OpenAI providers =====
+    // Anthropic's web_search_20250305 is a server-side tool handled by the Anthropic API itself.
+    // OpenAI providers don't support it, so we intercept and perform the search at proxy level.
+    //
+    // Strategy per provider:
+    //   DashScope (闃块噷): enable_search parameter
+    //   BigModel  (鏅鸿氨GLM): web_search tool type
+    //   Others   (SiliconFlow, etc.): Bing scraping fallback
+
+    // Helper: extract URLs from model response text (markdown links + bare URLs)
+    function extractUrlsFromText(text) {
+        const results = [];
+        const seen = new Set();
+        // 1. Markdown links: [title](url)
+        const mdPattern = /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g;
+        let m;
+        while ((m = mdPattern.exec(text)) && results.length < 15) {
+            if (!seen.has(m[2])) { seen.add(m[2]); results.push({ title: m[1], url: m[2] }); }
+        }
+        // 2. Bare URLs not already captured
+        const barePattern = /https?:\/\/[^\s\)\]<'"]+/g;
+        while ((m = barePattern.exec(text)) && results.length < 15) {
+            if (!seen.has(m[0])) { seen.add(m[0]); try { results.push({ title: new URL(m[0]).hostname, url: m[0] }); } catch (_) {} }
+        }
+        return results;
+    }
+
+    // Provider search: DashScope (闃块噷浜?鈥?Qwen models)
+    async function searchViaDashScope(query, target) {
+        let endpoint = normalizeBaseUrl(target.baseUrl);
+        if (!endpoint.endsWith('/v1')) endpoint += '/v1';
+        endpoint += '/chat/completions';
+        const resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + target.apiKey },
+            body: JSON.stringify({
+                model: target.model || 'qwen-turbo-latest',
+                messages: [
+                    { role: 'system', content: 'You are a web search assistant. Search the web and return comprehensive, up-to-date results with source links.' },
+                    { role: 'user', content: query }
+                ],
+                enable_search: true,
+                search_options: { forced_search: true, search_strategy: 'pro' },
+                stream: false, max_tokens: 4096,
+            }),
+            signal: AbortSignal.timeout(60000),
+        });
+        if (!resp.ok) { const t = await resp.text().catch(() => ''); throw new Error('DashScope ' + resp.status + ': ' + t.slice(0, 200)); }
+        const data = await resp.json();
+        const summary = data.choices?.[0]?.message?.content || '';
+        // DashScope returns structured results in search_info
+        const raw = data.search_info?.search_results || data.web_search_info?.results || data.search_results || [];
+        let results = raw.map(r => ({ title: r.title || r.name || '', url: r.url || r.link || '' })).filter(r => r.url);
+        if (results.length === 0) results = extractUrlsFromText(summary);
+        console.log('[Proxy] DashScope search:', results.length, 'results,', summary.length, 'chars');
+        return { searchResults: results, summaryText: summary };
+    }
+
+    // Provider search: BigModel (鏅鸿氨AI 鈥?GLM models)
+    async function searchViaBigModel(query, target) {
+        let endpoint = normalizeBaseUrl(target.baseUrl);
+        if (!endpoint.endsWith('/v1')) endpoint += '/v1';
+        endpoint += '/chat/completions';
+        const resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + target.apiKey },
+            body: JSON.stringify({
+                model: target.model || 'glm-4-plus',
+                messages: [
+                    { role: 'system', content: 'You are a web search assistant. Search the web and return comprehensive, up-to-date results with source links.' },
+                    { role: 'user', content: query }
+                ],
+                tools: [{ type: 'web_search', web_search: { enable: true, search_query: query } }],
+                stream: false, max_tokens: 4096,
+            }),
+            signal: AbortSignal.timeout(60000),
+        });
+        if (!resp.ok) { const t = await resp.text().catch(() => ''); throw new Error('BigModel ' + resp.status + ': ' + t.slice(0, 200)); }
+        const data = await resp.json();
+        const summary = data.choices?.[0]?.message?.content || '';
+        // GLM returns web_search results in the message's tool_calls or inline
+        let results = [];
+        const webSearchResult = data.web_search || data.choices?.[0]?.message?.web_search;
+        if (Array.isArray(webSearchResult)) {
+            results = webSearchResult.map(r => ({ title: r.title || '', url: r.link || r.url || '' })).filter(r => r.url);
+        }
+        if (results.length === 0) results = extractUrlsFromText(summary);
+        console.log('[Proxy] BigModel search:', results.length, 'results,', summary.length, 'chars');
+        return { searchResults: results, summaryText: summary };
+    }
+
+    // Universal fallback: Bing scraping (cn.bing.com 鈥?accessible from China)
+    async function searchViaBing(query) {
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml',
+        };
+        // Try cn.bing.com first, then bing.com
+        const urls = [
+            'https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&count=10',
+            'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&count=10',
+        ];
+        let html = '';
+        for (const url of urls) {
+            try {
+                const resp = await fetch(url, { headers, signal: AbortSignal.timeout(15000), redirect: 'follow' });
+                if (resp.ok) { html = await resp.text(); break; }
+            } catch (_) { continue; }
+        }
+        if (!html) throw new Error('Bing search failed: all endpoints unreachable');
+
+        const results = [];
+        // Strategy 1: <li class="b_algo"> blocks (desktop Bing)
+        const algoRegex = /<li class="b_algo"[^>]*>([\s\S]*?)<\/li>/g;
+        let item;
+        while ((item = algoRegex.exec(html)) && results.length < 10) {
+            const block = item[1];
+            const hrefMatch = block.match(/<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+            if (!hrefMatch) continue;
+            const url = hrefMatch[1];
+            const title = hrefMatch[2].replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"').trim();
+            // Extract snippet from <p> or <div class="b_caption">
+            let snippet = '';
+            const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/) || block.match(/<div class="b_caption"[^>]*>[\s\S]*?<p>([\s\S]*?)<\/p>/);
+            if (snippetMatch) snippet = (snippetMatch[1] || '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').trim();
+            if (title) results.push({ title, url, snippet });
+        }
+
+        // Strategy 2: if b_algo didn't match, try generic <h2><a href> pattern
+        if (results.length === 0) {
+            const genericRegex = /<h2[^>]*>\s*<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+            while ((item = genericRegex.exec(html)) && results.length < 10) {
+                const title = item[2].replace(/<[^>]*>/g, '').trim();
+                if (title && !item[1].includes('bing.com')) results.push({ title, url: item[1], snippet: '' });
+            }
+        }
+
+        const summaryText = results.length > 0
+            ? results.map((r, i) => (i + 1) + '. [' + r.title + '](' + r.url + ')' + (r.snippet ? '\n   ' + r.snippet : '')).join('\n\n')
+            : 'No results found for: ' + query;
+        console.log('[Proxy] Bing search:', results.length, 'results');
+        return { searchResults: results, summaryText };
+    }
+
+    // Main handler: intercept web_search_20250305, dispatch to provider or fallback
+    async function handleWebSearchProxy(anthropicReq, target, res) {
+        // Extract search query from messages
+        let searchQuery = '';
+        const msgs = anthropicReq.messages || [];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role !== 'user') continue;
+            const c = msgs[i].content;
+            if (typeof c === 'string') { searchQuery = c; break; }
+            if (Array.isArray(c)) { searchQuery = c.filter(b => b.type === 'text').map(b => b.text).join(' '); break; }
+        }
+        searchQuery = searchQuery.replace(/^Perform a web search for the query:\s*/i, '').trim();
+        const baseUrl = (target.baseUrl || '').toLowerCase();
+        console.log('[Proxy] WebSearch intercepted, query:', searchQuery, '| provider:', baseUrl.slice(0, 50));
+
+        let searchResults = [];
+        let summaryText = '';
+
+        // Dispatch: provider-native search 鈫?Bing fallback
+        const strategies = [];
+        if (/dashscope/i.test(baseUrl))              strategies.push(() => searchViaDashScope(searchQuery, target));
+        else if (/bigmodel|zhipuai/i.test(baseUrl))   strategies.push(() => searchViaBigModel(searchQuery, target));
+        // Bing is always the final fallback for any provider
+        strategies.push(() => searchViaBing(searchQuery));
+
+        for (const strategy of strategies) {
+            try {
+                const result = await strategy();
+                searchResults = result.searchResults || [];
+                summaryText = result.summaryText || '';
+                if (searchResults.length > 0 || summaryText.length > 50) break; // got useful results
+            } catch (err) {
+                console.warn('[Proxy] Search strategy failed:', err.message, '鈥?trying next');
+            }
+        }
+        if (!summaryText) summaryText = 'Web search returned no results for: ' + searchQuery;
+
+        // Generate Anthropic-format SSE response with search results
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        const toolId = 'toolu_ws_' + Date.now();
+        const ev = (name, data) => res.write('event: ' + name + '\ndata: ' + JSON.stringify(data) + '\n\n');
+
+        ev('message_start', { type: 'message_start', message: { id: 'msg_ws_' + Date.now(), type: 'message', role: 'assistant', content: [], model: target.model, usage: { input_tokens: 0, output_tokens: 0 } } });
+
+        // Block 0: server_tool_use (search invocation)
+        ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: toolId, name: 'web_search', input: {} } });
+        ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ query: searchQuery }) } });
+        ev('content_block_stop', { type: 'content_block_stop', index: 0 });
+
+        // Block 1: web_search_tool_result (structured results)
+        const resultContent = searchResults.length > 0
+            ? searchResults.map(r => ({ type: 'web_search_result', title: r.title, url: r.url }))
+            : [];
+        ev('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'web_search_tool_result', tool_use_id: toolId, content: resultContent } });
+        ev('content_block_stop', { type: 'content_block_stop', index: 1 });
+
+        // Block 2: text summary
+        ev('content_block_start', { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } });
+        if (summaryText) {
+            const chunkSize = 200;
+            for (let i = 0; i < summaryText.length; i += chunkSize) {
+                ev('content_block_delta', { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: summaryText.slice(i, i + chunkSize) } });
+            }
+        }
+        ev('content_block_stop', { type: 'content_block_stop', index: 2 });
+
+        ev('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: Math.ceil(summaryText.length / 4) } });
+        ev('message_stop', { type: 'message_stop' });
+        res.end();
+    }
+
+    // ===== OpenAI鈫扐nthropic Conversion Proxy =====
     // Runs on a dynamic port; engine points ANTHROPIC_BASE_URL to it
     // The proxy receives Anthropic-format requests, converts to OpenAI format, calls the real endpoint
     const http = require('http');
@@ -164,7 +467,8 @@ function initServer(mainWindow) {
 
     // Pending image blocks to inject into the next API request (per-conversation)
     // The chat handler stores base64 images here; the proxy injects them into the user message
-    const pendingImageBlocks = new Map(); // conversationId → [{ type: 'image', source: { type: 'base64', media_type, data } }]
+    const pendingImageBlocks = new Map();
+    const emptyToolCallLoops = new Map(); // conversationId -> { count, toolName, updatedAt } // conversationId 鈫?[{ type: 'image', source: { type: 'base64', media_type, data } }]
 
     const proxyServer = http.createServer(async (req, res) => {
         if (req.method === 'POST' && req.url.includes('/messages')) {
@@ -174,11 +478,19 @@ function initServer(mainWindow) {
                 try {
                     const anthropicReq = JSON.parse(body);
                     const target = proxyTarget;
+                    const proxyReqId = 'proxy_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
+                    console.log('[Proxy] Request start',
+                        '| id=', proxyReqId,
+                        '| conv=', target.conversationId || '',
+                        '| model=', target.model || anthropicReq.model || '',
+                        '| msgCount=', Array.isArray(anthropicReq.messages) ? anthropicReq.messages.length : 0,
+                        '| toolCount=', Array.isArray(anthropicReq.tools) ? anthropicReq.tools.length : 0,
+                        '| hasThinking=', !!anthropicReq.thinking);
 
                     // Inject any pending image blocks into the last user message
                     // (images uploaded by the user that need to be embedded in the API request)
                     // Only inject into the initial user message (not tool_result follow-ups).
-                    // Don't delete — keep for retries. The chat handler clears after engine exits.
+                    // Don't delete 鈥?keep for retries. The chat handler clears after engine exits.
                     if (target.conversationId && pendingImageBlocks.has(target.conversationId)) {
                         const imgBlocks = pendingImageBlocks.get(target.conversationId);
                         if (imgBlocks && imgBlocks.length > 0 && anthropicReq.messages) {
@@ -199,8 +511,14 @@ function initServer(mainWindow) {
                         }
                     }
 
+                    // Intercept web_search_20250305 server tool for OpenAI providers
+                    const hasServerWebSearch = (anthropicReq.tools || []).some(t => t.type === 'web_search_20250305');
+                    if (hasServerWebSearch && target.format === 'openai') {
+                        return await handleWebSearchProxy(anthropicReq, target, res);
+                    }
+
                     if (target.format === 'openai') {
-                        // Convert Anthropic → OpenAI format
+                        // Convert Anthropic 鈫?OpenAI format
                         const openaiMessages = [];
                         if (anthropicReq.system) {
                             const sysText = Array.isArray(anthropicReq.system)
@@ -254,7 +572,7 @@ function initServer(mainWindow) {
                             }
                         }
 
-                        // Convert Anthropic tools → OpenAI tools
+                        // Convert Anthropic tools 鈫?OpenAI tools
                         const openaiTools = (anthropicReq.tools || []).map(t => ({
                             type: 'function',
                             function: {
@@ -267,23 +585,35 @@ function initServer(mainWindow) {
                         const openaiBody = {
                             model: target.model || anthropicReq.model,
                             messages: openaiMessages,
-                            max_tokens: Math.min(anthropicReq.max_tokens || 4096, 8192),
+                            max_tokens: Math.min(anthropicReq.max_tokens || 8192, 32768),
                             stream: true,
                         };
                         if (openaiTools.length > 0) openaiBody.tools = openaiTools;
+                        // Prevent providers from batching many tool calls in a single assistant turn.
+                        // Batched Edit calls are often computed against stale file content and cause
+                        // "String to replace not found" loops.
+                        if (openaiTools.length > 0 && /qwen|glm|deepseek|minimax/i.test(String(target.model || anthropicReq.model || ''))) {
+                            openaiBody.parallel_tool_calls = false;
+                        }
                         if (anthropicReq.temperature != null) openaiBody.temperature = anthropicReq.temperature;
-                        // Convert Anthropic thinking config → OpenAI-compatible thinking params
+                        // Convert Anthropic thinking config 鈫?OpenAI-compatible thinking params
                         // Qwen uses enable_thinking, DeepSeek uses similar pattern
                         if (anthropicReq.thinking && anthropicReq.thinking.type === 'enabled') {
                             // Qwen (and similar models) have a known issue where thinking + tool_calls
-                            // don't work reliably together — the model puts tool arguments into
+                            // don't work reliably together 鈥?the model puts tool arguments into
                             // reasoning_content instead of function.arguments, causing empty tool inputs.
                             // Only enable thinking when there are no tools in the request.
                             if (openaiTools.length > 0) {
-                                console.log('[Proxy] Tools present — disabling thinking to avoid empty tool args (thinking+tools incompatibility)');
+                                console.log('[Proxy] Tools present 鈥?disabling thinking to avoid empty tool args (thinking+tools incompatibility)');
                             } else {
                                 openaiBody.enable_thinking = true;
                             }
+                        }
+
+                        if (openaiTools.length > 0 && /qwen|deepseek/i.test(String(target.model || anthropicReq.model || ''))) {
+                            // Some OpenAI-compatible reasoning models emit reasoning_content by default even when
+                            // thinking wasn't explicitly requested. Force-disable it on tool turns.
+                            openaiBody.enable_thinking = false;
                         }
 
                         let endpoint = normalizeBaseUrl(target.baseUrl);
@@ -297,8 +627,16 @@ function initServer(mainWindow) {
                         const bodyStr = JSON.stringify(openaiBody);
                         for (let attempt = 0; attempt <= maxRetries; attempt++) {
                             const fetchController = new AbortController();
-                            const fetchTimeout = setTimeout(() => fetchController.abort(), 120000);
+                            const fetchTimeout = setTimeout(() => fetchController.abort(), 300000); // 5 min
                             try {
+                                console.log('[Proxy] Upstream fetch',
+                                    '| id=', proxyReqId,
+                                    '| attempt=', attempt + 1,
+                                    '| endpoint=', endpoint,
+                                    '| model=', openaiBody.model,
+                                    '| tools=', Array.isArray(openaiBody.tools) ? openaiBody.tools.length : 0,
+                                    '| enable_thinking=', openaiBody.enable_thinking === true,
+                                    '| parallel_tool_calls=', openaiBody.parallel_tool_calls);
                                 upstreamRes = await fetch(endpoint, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + target.apiKey },
@@ -331,7 +669,7 @@ function initServer(mainWindow) {
                             return;
                         }
 
-                        // Stream OpenAI SSE → convert to Anthropic SSE format
+                        // Stream OpenAI SSE 鈫?convert to Anthropic SSE format
                         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
 
                         // Send message_start
@@ -344,133 +682,271 @@ function initServer(mainWindow) {
                         const decoder = new TextDecoder();
                         let sseBuffer = '';
                         let totalTokens = 0;
-                        let contentBlockIndex = 0;
-                        let textBlockStarted = false;
-                        let thinkingBlockStarted = false;
-                        // Track tool_calls being streamed (OpenAI streams them incrementally)
-                        const pendingToolCalls = new Map(); // index → { id, name, args }
+                        let nextContentBlockIndex = 0;
+                        let textBlockIndex = null;
+                        let thinkingBlockIndex = null;
+                        let emittedToolCalls = false;
+                        // Track tool_calls being streamed (OpenAI streams them incrementally).
+                        // Buffer them until the end of the tool-call turn so we can emit valid
+                        // Anthropic tool_use blocks even if the upstream provider interleaves
+                        // reasoning_content and tool_calls.
+                        const pendingToolCalls = new Map(); // key -> { id, name, args }
+                        const writeProxyEvent = (eventName, payload) => {
+                            res.write('event: ' + eventName + '\ndata: ' + JSON.stringify(payload) + '\n\n');
+                        };
+                        const closeThinkingBlock = () => {
+                            if (thinkingBlockIndex == null) return;
+                            writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: thinkingBlockIndex });
+                            thinkingBlockIndex = null;
+                        };
+                        const closeTextBlock = () => {
+                            if (textBlockIndex == null) return;
+                            writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
+                            textBlockIndex = null;
+                        };
+                        const ensureThinkingBlock = () => {
+                            if (thinkingBlockIndex != null) return;
+                            closeTextBlock();
+                            thinkingBlockIndex = nextContentBlockIndex++;
+                            writeProxyEvent('content_block_start', {
+                                type: 'content_block_start',
+                                index: thinkingBlockIndex,
+                                content_block: { type: 'thinking', thinking: '' }
+                            });
+                        };
+                        const ensureTextBlock = () => {
+                            if (textBlockIndex != null) return;
+                            closeThinkingBlock();
+                            textBlockIndex = nextContentBlockIndex++;
+                            writeProxyEvent('content_block_start', {
+                                type: 'content_block_start',
+                                index: textBlockIndex,
+                                content_block: { type: 'text', text: '' }
+                            });
+                        };
+                        const normalizeToolArgsToString = (argsValue) => {
+                            if (argsValue == null) return '';
+                            if (typeof argsValue === 'string') return argsValue;
+                            if (typeof argsValue === 'object') {
+                                try { return JSON.stringify(argsValue); } catch (_) { return ''; }
+                            }
+                            return String(argsValue);
+                        };
+                        const mergeToolArgs = (currentArgs, incomingArgs) => {
+                            if (!incomingArgs) return currentArgs || '';
+                            if (!currentArgs) return incomingArgs;
+                            // Some OpenAI-compatible providers stream cumulative argument snapshots
+                            // instead of append-only deltas. Detect and replace in that case.
+                            if (incomingArgs.length >= currentArgs.length && incomingArgs.startsWith(currentArgs)) {
+                                return incomingArgs;
+                            }
+                            if (currentArgs.length > incomingArgs.length && currentArgs.startsWith(incomingArgs)) {
+                                return currentArgs;
+                            }
+                            return currentArgs + incomingArgs;
+                        };
+                        const upsertPendingToolCall = (rawToolCall, fallbackKey) => {
+                            if (!rawToolCall) return;
+                            const rawIndex = rawToolCall.index;
+                            const rawId = rawToolCall.id;
+                            const key = rawIndex != null ? ('idx:' + rawIndex) : (rawId ? ('id:' + rawId) : fallbackKey);
+                            if (!pendingToolCalls.has(key)) pendingToolCalls.set(key, { id: '', name: '', args: '' });
+                            const ptc = pendingToolCalls.get(key);
+                            if (rawId && !ptc.id) ptc.id = rawId;
+                            const fn = rawToolCall.function || rawToolCall.function_call || {};
+                            if (rawToolCall.name && !ptc.name) ptc.name = rawToolCall.name;
+                            if (fn.name && !ptc.name) ptc.name = fn.name;
+                            const argsChunk = normalizeToolArgsToString(
+                                fn.arguments != null ? fn.arguments :
+                                rawToolCall.arguments != null ? rawToolCall.arguments :
+                                rawToolCall.input != null ? rawToolCall.input :
+                                ''
+                            );
+                            if (argsChunk) ptc.args = mergeToolArgs(ptc.args, argsChunk);
+                        };
+                        const analyzePendingToolCalls = () => {
+                            const sortedToolCalls = Array.from(pendingToolCalls.entries());
+                            const toolNames = [];
+                            let allEmpty = sortedToolCalls.length > 0;
+                            let hasMalformed = false;
+                            for (const [, ptc] of sortedToolCalls) {
+                                const toolName = ptc.name || '';
+                                if (toolName) toolNames.push(toolName);
+                                let parsedInput = {};
+                                let parsedOk = true;
+                                let parseErr = null;
+                                try { parsedInput = JSON.parse(ptc.args || '{}'); } catch (err) { parsedOk = false; parseErr = err; hasMalformed = !!ptc.args; }
+                                const recoveredInput = !parsedOk ? recoverMalformedToolInput(toolName, ptc.args) : null;
+                                ptc.recoveredInput = recoveredInput || null;
+                                if (ptc.args && Object.keys(parsedInput).length > 0) allEmpty = false;
+                                if (recoveredInput && Object.keys(recoveredInput).length > 0) allEmpty = false;
+                                if (!ptc.args && toolName) {
+                                    console.warn('[Proxy] Tool call "' + toolName + '" has empty args; model may have failed to generate arguments');
+                                }
+                                if (ptc.args && !parsedOk) {
+                                    const firstBrace = ptc.args.indexOf('{');
+                                    const lastBrace = ptc.args.lastIndexOf('}');
+                                    const openBraces = (ptc.args.match(/\{/g) || []).length;
+                                    const closeBraces = (ptc.args.match(/\}/g) || []).length;
+                                    console.warn(
+                                        '[Proxy] Tool call "' + toolName + '" has malformed args',
+                                        '| len=', ptc.args.length,
+                                        '| err=', (parseErr && parseErr.message) || 'unknown',
+                                        '| firstBrace=', firstBrace,
+                                        '| lastBrace=', lastBrace,
+                                        '| braces=', openBraces + '/' + closeBraces,
+                                        '| recovered=', !!recoveredInput,
+                                        '| preview=', ptc.args.slice(0, 300),
+                                        '| tail=', ptc.args.slice(-300)
+                                    );
+                                }
+                            }
+                            return { sortedToolCalls, toolNames, allEmpty, hasMalformed };
+                        };
+                        const emitPendingToolCalls = () => {
+                            if (emittedToolCalls || pendingToolCalls.size === 0) return;
+                            closeThinkingBlock();
+                            closeTextBlock();
+                            const { sortedToolCalls } = analyzePendingToolCalls();
+                            for (const [, ptc] of sortedToolCalls) {
+                                const blockIndex = nextContentBlockIndex++;
+                                const toolId = ptc.id || ('call_' + blockIndex);
+                                const toolName = ptc.name || '';
+                                const recoveredInput = ptc.recoveredInput && typeof ptc.recoveredInput === 'object' ? ptc.recoveredInput : {};
+                                writeProxyEvent('content_block_start', {
+                                    type: 'content_block_start',
+                                    index: blockIndex,
+                                    content_block: { type: 'tool_use', id: toolId, name: toolName, input: recoveredInput }
+                                });
+                                if (ptc.args && Object.keys(recoveredInput).length === 0) {
+                                    writeProxyEvent('content_block_delta', {
+                                        type: 'content_block_delta',
+                                        index: blockIndex,
+                                        delta: { type: 'input_json_delta', partial_json: ptc.args }
+                                    });
+                                }
+                                writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+                            }
+                            emittedToolCalls = true;
+                        };
 
                         while (true) {
                             const { done, value } = await reader.read();
                             if (done) break;
                             sseBuffer += decoder.decode(value, { stream: true });
-                            const lines = sseBuffer.split('\n');
-                            sseBuffer = lines.pop() || '';
-                            for (const line of lines) {
-                                if (!line.startsWith('data: ')) continue;
-                                const data = line.slice(6).trim();
+                            const consumed = consumeSSEPayloads(sseBuffer);
+                            sseBuffer = consumed.remainder;
+                            for (const data of consumed.payloads) {
                                 if (data === '[DONE]') continue;
                                 try {
                                     const chunk = JSON.parse(data);
-                                    const delta = chunk.choices?.[0]?.delta;
-                                    const finishReason = chunk.choices?.[0]?.finish_reason;
+                                    const choice = chunk.choices?.[0] || {};
+                                    const delta = choice.delta;
+                                    const finishReason = choice.finish_reason;
 
-                                    // Reasoning/thinking content (Qwen reasoning_content, DeepSeek etc.)
                                     if (delta?.reasoning_content) {
-                                        if (!thinkingBlockStarted) {
-                                            res.write('event: content_block_start\ndata: ' + JSON.stringify({
-                                                type: 'content_block_start', index: contentBlockIndex, content_block: { type: 'thinking', thinking: '' }
-                                            }) + '\n\n');
-                                            thinkingBlockStarted = true;
-                                        }
-                                        res.write('event: content_block_delta\ndata: ' + JSON.stringify({
-                                            type: 'content_block_delta', index: contentBlockIndex, delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
-                                        }) + '\n\n');
+                                        ensureThinkingBlock();
+                                        writeProxyEvent('content_block_delta', {
+                                            type: 'content_block_delta',
+                                            index: thinkingBlockIndex,
+                                            delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
+                                        });
                                     }
 
-                                    // Text content
                                     if (delta?.content) {
-                                        // Close thinking block before starting text block
-                                        if (thinkingBlockStarted) {
-                                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
-                                            contentBlockIndex++;
-                                            thinkingBlockStarted = false;
-                                        }
-                                        if (!textBlockStarted) {
-                                            res.write('event: content_block_start\ndata: ' + JSON.stringify({
-                                                type: 'content_block_start', index: contentBlockIndex, content_block: { type: 'text', text: '' }
-                                            }) + '\n\n');
-                                            textBlockStarted = true;
-                                        }
-                                        res.write('event: content_block_delta\ndata: ' + JSON.stringify({
-                                            type: 'content_block_delta', index: contentBlockIndex, delta: { type: 'text_delta', text: delta.content }
-                                        }) + '\n\n');
+                                        ensureTextBlock();
+                                        writeProxyEvent('content_block_delta', {
+                                            type: 'content_block_delta',
+                                            index: textBlockIndex,
+                                            delta: { type: 'text_delta', text: delta.content }
+                                        });
                                     }
 
-                                    // Tool calls (OpenAI streams them as delta.tool_calls[])
-                                    if (delta?.tool_calls) {
-                                        for (const tc of delta.tool_calls) {
-                                            const tcIdx = tc.index ?? 0;
-                                            if (!pendingToolCalls.has(tcIdx)) {
-                                                // Close text block if open
-                                                if (textBlockStarted) {
-                                                    res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
-                                                    contentBlockIndex++;
-                                                    textBlockStarted = false;
-                                                }
-                                                pendingToolCalls.set(tcIdx, { id: tc.id || ('call_' + tcIdx), name: tc.function?.name || '', args: '' });
-                                                // Send content_block_start for tool_use
-                                                const ptc = pendingToolCalls.get(tcIdx);
-                                                res.write('event: content_block_start\ndata: ' + JSON.stringify({
-                                                    type: 'content_block_start', index: contentBlockIndex + tcIdx,
-                                                    content_block: { type: 'tool_use', id: ptc.id, name: ptc.name, input: {} }
-                                                }) + '\n\n');
-                                            }
-                                            const ptc = pendingToolCalls.get(tcIdx);
-                                            if (tc.function?.name && !ptc.name) ptc.name = tc.function.name;
-                                            if (tc.function?.arguments) ptc.args += tc.function.arguments;
-                                        }
+                                    if (Array.isArray(delta?.tool_calls)) {
+                                        for (let i = 0; i < delta.tool_calls.length; i++) upsertPendingToolCall(delta.tool_calls[i], 'delta:' + i);
+                                    }
+                                    if (delta?.function_call) upsertPendingToolCall({ index: 0, function_call: delta.function_call }, 'legacy-delta:0');
+                                    if (Array.isArray(choice.message?.tool_calls)) {
+                                        console.log('[Proxy] Using choice.message.tool_calls fallback', '| id=', proxyReqId, '| count=', choice.message.tool_calls.length);
+                                        for (let i = 0; i < choice.message.tool_calls.length; i++) upsertPendingToolCall(choice.message.tool_calls[i], 'message:' + i);
+                                    }
+                                    if (Array.isArray(choice.tool_calls)) {
+                                        console.log('[Proxy] Using choice.tool_calls fallback', '| id=', proxyReqId, '| count=', choice.tool_calls.length);
+                                        for (let i = 0; i < choice.tool_calls.length; i++) upsertPendingToolCall(choice.tool_calls[i], 'choice:' + i);
+                                    }
+                                    if (choice.message?.function_call) {
+                                        console.log('[Proxy] Using choice.message.function_call fallback', '| id=', proxyReqId);
+                                        upsertPendingToolCall({ index: 0, function_call: choice.message.function_call }, 'legacy-message:0');
                                     }
 
-                                    // On finish, close all pending tool calls
-                                    if (finishReason === 'tool_calls' || finishReason === 'stop') {
-                                        if (textBlockStarted) {
-                                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
-                                            contentBlockIndex++;
-                                            textBlockStarted = false;
-                                        }
-                                        for (const [tcIdx, ptc] of pendingToolCalls) {
-                                            // Warn if tool args are empty — qwen sometimes generates tool_call
-                                            // name+id but fails to fill in function.arguments
-                                            let parsedInput = {};
-                                            try { parsedInput = JSON.parse(ptc.args); } catch (_) {}
-                                            if ((!ptc.args || Object.keys(parsedInput).length === 0) && ptc.name) {
-                                                console.warn('[Proxy] Tool call "' + ptc.name + '" has empty args — model may have failed to generate arguments');
-                                            }
-                                            // Send input_json_delta with complete input
-                                            res.write('event: content_block_delta\ndata: ' + JSON.stringify({
-                                                type: 'content_block_delta', index: contentBlockIndex + tcIdx,
-                                                delta: { type: 'input_json_delta', partial_json: ptc.args }
-                                            }) + '\n\n');
-                                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({
-                                                type: 'content_block_stop', index: contentBlockIndex + tcIdx
-                                            }) + '\n\n');
-                                        }
+                                    if (finishReason === 'tool_calls' || finishReason === 'stop' || finishReason === 'length' || finishReason === 'content_filter') {
+                                        // Final emission is handled after the upstream stream fully ends,
+                                        // so we can detect and suppress empty-tool-call loops first.
                                     }
 
                                     if (chunk.usage) totalTokens = chunk.usage.total_tokens || 0;
-                                } catch (_) {}
+                                } catch (parseErr) {
+                                    console.warn('[Proxy] Failed to parse upstream SSE chunk:', (parseErr && parseErr.message) || parseErr, '| data=', data.slice(0, 300));
+                                }
                             }
                         }
 
-                        // Close any remaining open blocks
-                        if (thinkingBlockStarted) {
-                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
-                            contentBlockIndex++;
-                        }
-                        if (textBlockStarted) {
-                            res.write('event: content_block_stop\ndata: ' + JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex }) + '\n\n');
+                        let forcedStopReason = '';
+                        let forcedText = '';
+                        if (pendingToolCalls.size > 0 && target.conversationId) {
+                            const analysis = analyzePendingToolCalls();
+                            if (analysis.allEmpty) {
+                                const toolName = analysis.toolNames.join(',') || '(unknown)';
+                                const prevState = emptyToolCallLoops.get(target.conversationId);
+                                const loopCount = prevState && prevState.toolName === toolName ? prevState.count + 1 : 1;
+                                emptyToolCallLoops.set(target.conversationId, { count: loopCount, toolName, updatedAt: Date.now() });
+                                console.warn('[Proxy] Empty tool-call loop detected', '| conv=', target.conversationId, '| tool=', toolName, '| count=', loopCount, '| malformed=', analysis.hasMalformed);
+                                if (loopCount >= 3) {
+                                    forcedStopReason = 'end_turn';
+                                    forcedText = '[Model repeatedly emitted empty tool calls for ' + toolName + '. This provider/model appears incompatible with required tool arguments. Please try another model/provider.]';
+                                    pendingToolCalls.clear();
+                                    emptyToolCallLoops.delete(target.conversationId);
+                                }
+                            } else {
+                                emptyToolCallLoops.delete(target.conversationId);
+                            }
+                        } else if (target.conversationId) {
+                            emptyToolCallLoops.delete(target.conversationId);
                         }
 
-                        // Send message_delta + message_stop
-                        const stopReason = pendingToolCalls.size > 0 ? 'tool_use' : 'end_turn';
-                        res.write('event: message_delta\ndata: ' + JSON.stringify({
+                        if (!forcedStopReason) emitPendingToolCalls();
+                        closeThinkingBlock();
+                        closeTextBlock();
+                        if (forcedText) {
+                            const forcedTextIndex = nextContentBlockIndex++;
+                            writeProxyEvent('content_block_start', {
+                                type: 'content_block_start',
+                                index: forcedTextIndex,
+                                content_block: { type: 'text', text: '' }
+                            });
+                            writeProxyEvent('content_block_delta', {
+                                type: 'content_block_delta',
+                                index: forcedTextIndex,
+                                delta: { type: 'text_delta', text: forcedText }
+                            });
+                            writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: forcedTextIndex });
+                        }
+
+                        const stopReason = forcedStopReason || (pendingToolCalls.size > 0 ? 'tool_use' : 'end_turn');
+                        console.log('[Proxy] Request done',
+                            '| id=', proxyReqId,
+                            '| conv=', target.conversationId || '',
+                            '| stopReason=', stopReason,
+                            '| toolCalls=', pendingToolCalls.size,
+                            '| outputTokens=', totalTokens,
+                            forcedText ? '| forcedText=1' : '');
+                        writeProxyEvent('message_delta', {
                             type: 'message_delta', delta: { stop_reason: stopReason }, usage: { output_tokens: totalTokens }
-                        }) + '\n\n');
-                        res.write('event: message_stop\ndata: ' + JSON.stringify({ type: 'message_stop' }) + '\n\n');
+                        });
+                        writeProxyEvent('message_stop', { type: 'message_stop' });
                         res.end();
                     } else {
-                        // Anthropic format — passthrough to real endpoint
+                        // Anthropic format 鈥?passthrough to real endpoint
                         let endpoint = normalizeBaseUrl(target.baseUrl);
                         if (!endpoint.endsWith('/v1')) endpoint += '/v1';
                         endpoint += '/messages';
@@ -497,8 +973,16 @@ function initServer(mainWindow) {
                     }
                 } catch (err) {
                     console.error('[Proxy] Error:', err.message);
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: err.message } }));
+                    if (res.headersSent) {
+                        try {
+                            res.write('event: error\ndata: ' + JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: err.message } }) + '\n\n');
+                            res.write('event: message_stop\ndata: ' + JSON.stringify({ type: 'message_stop' }) + '\n\n');
+                        } catch (_) {}
+                        try { res.end(); } catch (_) {}
+                    } else {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: err.message } }));
+                    }
                 }
             });
         } else {
@@ -517,10 +1001,10 @@ function initServer(mainWindow) {
             const bConv = db.conversations.find(c => c.id === conversationId);
             if (!bConv || (bConv.title !== 'New Conversation' && bConv.title !== 'New Chat')) return;
 
-            // Strip -thinking suffix — raw API doesn't accept it
+            // Strip -thinking suffix 鈥?raw API doesn't accept it
             let modelId = (activeModel || 'claude-sonnet-4-6').replace(/-thinking$/, '');
 
-            const titlePrompt = `请根据这段对话生成一个简短的标题（最多5-7个字，不要用引号），概括对话的主题：\n\n用户：${userMsg}\n助手：${assistantMsg}\n\n标题：`;
+            const titlePrompt = `Please generate a short conversation title (max 5-7 words, no quotes) based on this dialogue:\n\nUser: ${userMsg}\nAssistant: ${assistantMsg}\n\nTitle:`;
 
             if (apiFormat === 'openai') {
                 // OpenAI format title generation
@@ -617,7 +1101,7 @@ function initServer(mainWindow) {
         }
     }
 
-    // ═══════════════════ Projects ═══════════════════
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Projects 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
     server.get('/api/projects', (req, res) => {
         const list = [...db.projects]
@@ -705,7 +1189,7 @@ function initServer(mainWindow) {
         res.json({ success: true });
     });
 
-    // ═══ Project file upload ═══
+    // 鈺愨晲鈺?Project file upload 鈺愨晲鈺?
     const projectUploadStorage = multer.diskStorage({
         destination: (req, file, cb) => {
             const project = db.projects.find(p => p.id === req.params.id);
@@ -761,7 +1245,7 @@ function initServer(mainWindow) {
         res.json({ success: true });
     });
 
-    // ═══ Project conversations ═══
+    // 鈺愨晲鈺?Project conversations 鈺愨晲鈺?
     server.get('/api/projects/:id/conversations', (req, res) => {
         const convs = db.conversations.filter(c => c.project_id === req.params.id)
             .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -795,7 +1279,7 @@ function initServer(mainWindow) {
         res.json(newConv);
     });
 
-    // ═══════════════════ Conversations ═══════════════════
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Conversations 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
     // ===== Artifacts API =====
     // Scans all messages for Write tool calls that created renderable HTML files
@@ -964,9 +1448,9 @@ function initServer(mainWindow) {
 
         if (req.body.title) conv.title = req.body.title;
         if (req.body.model && req.body.model !== conv.model) {
-            console.log('[Session] Model changed for conv', conv.id, ':', conv.model, '→', req.body.model, '(session preserved)');
+            console.log('[Session] Model changed for conv', conv.id, ':', conv.model, '->', req.body.model, '(session preserved)');
             conv.model = req.body.model;
-            // Don't reset claude_session_id — engine sessions store message history
+            // Don't reset claude_session_id 鈥?engine sessions store message history
             // which is model-agnostic. The engine can resume with a different model.
         }
         // Move conversation to/from a project
@@ -1015,7 +1499,7 @@ function initServer(mainWindow) {
             if (m.conversation_id !== id) return true;
             return new Date(m.created_at).getTime() < targetCreatedAt;
         });
-        // Reset engine session — old context is no longer valid
+        // Reset engine session 鈥?old context is no longer valid
         const conv = db.conversations.find(c => c.id === id);
         if (conv) { conv.claude_session_id = null; console.log('[Session] Reset for conv', id, '(messages deleted)'); }
         saveDb();
@@ -1037,7 +1521,7 @@ function initServer(mainWindow) {
                 return new Date(m.created_at).getTime() < cutoffTime;
             });
         }
-        // Reset engine session — old context is no longer valid
+        // Reset engine session 鈥?old context is no longer valid
         const conv = db.conversations.find(c => c.id === id);
         if (conv) { conv.claude_session_id = null; console.log('[Session] Reset for conv', id, '(tail deleted)'); }
         saveDb();
@@ -1065,9 +1549,9 @@ function initServer(mainWindow) {
         // Verify file on disk has actual content
         let diskSize = 0;
         try { diskSize = fs.statSync(req.file.path).size; } catch (_) {}
-        console.log(`[Upload] ${req.file.originalname} → ${req.file.path} (multer=${req.file.size}, disk=${diskSize})`);
+        console.log(`[Upload] ${req.file.originalname} 鈫?${req.file.path} (multer=${req.file.size}, disk=${diskSize})`);
         if (diskSize === 0) {
-            // File is empty on disk — tell client to retry
+            // File is empty on disk 鈥?tell client to retry
             try { fs.unlinkSync(req.file.path); } catch (_) {}
             return res.status(422).json({ error: 'File upload incomplete (0 bytes on disk). Please retry.' });
         }
@@ -1148,7 +1632,7 @@ function initServer(mainWindow) {
         res.status(404).json({ error: 'File not found' });
     });
 
-    // Compact conversation — delegates to Claude Code engine's /compact command
+    // Compact conversation 鈥?delegates to Claude Code engine's /compact command
     server.post('/api/conversations/:id/compact', async (req, res) => {
         const conv = db.conversations.find(c => c.id === req.params.id);
         if (!conv) return res.status(404).json({ error: 'Conversation not found' });
@@ -1168,7 +1652,7 @@ function initServer(mainWindow) {
         const messagesBeforeCompact = db.messages.filter(m => m.conversation_id === req.params.id).length;
 
         try {
-            // Spawn engine CLI with /compact as the prompt — engine handles the full compaction internally
+            // Spawn engine CLI with /compact as the prompt 鈥?engine handles the full compaction internally
             const compactPrompt = instruction ? `/compact ${instruction}` : '/compact';
             const cliArgs = [
                 '--preload', enginePreload,
@@ -1259,7 +1743,7 @@ function initServer(mainWindow) {
                 child.on('error', reject);
             });
 
-            // Engine has compacted its internal session — keep all old messages
+            // Engine has compacted its internal session 鈥?keep all old messages
             // in local db for UI display, just append a compact boundary marker
             const tokensSaved = compactMetadata && compactMetadata.pre_tokens
                 ? Math.round(compactMetadata.pre_tokens * 0.7)
@@ -1283,7 +1767,7 @@ function initServer(mainWindow) {
         }
     });
 
-    // AskUserQuestion — receive user's answer and write back to engine stdin
+    // AskUserQuestion 鈥?receive user's answer and write back to engine stdin
     server.post('/api/conversations/:id/answer', (req, res) => {
         const { request_id, tool_use_id, answers } = req.body;
         const child = activeChildren.get(req.params.id);
@@ -1317,13 +1801,13 @@ function initServer(mainWindow) {
         }
     });
 
-    // Stream status — check if a conversation has an active engine stream
+    // Stream status 鈥?check if a conversation has an active engine stream
     server.get('/api/conversations/:id/stream-status', (req, res) => {
         const stream = activeStreams.get(req.params.id);
         res.json({ active: !!(stream && !stream.done), eventCount: stream ? stream.events.length : 0 });
     });
 
-    // Reconnect to an active stream — sends all buffered events then continues live
+    // Reconnect to an active stream 鈥?sends all buffered events then continues live
     server.get('/api/conversations/:id/reconnect', (req, res) => {
         const stream = activeStreams.get(req.params.id);
         if (!stream) return res.status(404).json({ error: 'No active stream' });
@@ -1369,18 +1853,45 @@ function initServer(mainWindow) {
     server.patch('/api/providers/:id', (req, res) => {
         const p = providers.find(x => x.id === req.params.id);
         if (!p) return res.status(404).json({ error: 'Not found' });
+        console.log('[Providers] PATCH', req.params.id,
+            '| keys=', Object.keys(req.body || {}),
+            '| bodySummary=', JSON.stringify({
+                name: req.body && req.body.name,
+                enabled: req.body && req.body.enabled,
+                format: req.body && req.body.format,
+                baseUrl: req.body && req.body.baseUrl,
+                apiKeyChanged: !!(req.body && typeof req.body.apiKey === 'string'),
+                modelsCount: Array.isArray(req.body && req.body.models) ? req.body.models.length : undefined,
+            }).slice(0, 500),
+            '| poolBefore=', summarizeEnginePool());
         if (req.body.baseUrl) req.body.baseUrl = normalizeBaseUrl(req.body.baseUrl);
         Object.assign(p, req.body);
         delete p._id; // prevent duplication
         saveProviders();
-        // Kill all engines so they pick up new provider settings on next request
-        for (const [id] of enginePool) killEngine(id);
+        // Refresh idle engines immediately, but don't kill active turns mid-response.
+        // Active engines are marked stale and will be restarted on the next turn/warm.
+        for (const [id, eng] of enginePool) {
+            if (eng.state === 'processing') {
+                eng.needsRestart = true;
+                console.log('[EnginePool] Deferring engine restart for active conversation', id, '(provider updated)');
+            } else {
+                killEngine(id, 'provider_updated_idle_engine', { providerId: req.params.id, changedKeys: Object.keys(req.body || {}) });
+            }
+        }
         res.json(p);
     });
     server.delete('/api/providers/:id', (req, res) => {
+        console.log('[Providers] DELETE', req.params.id, '| poolBefore=', summarizeEnginePool());
         providers = providers.filter(x => x.id !== req.params.id);
         saveProviders();
-        for (const [id] of enginePool) killEngine(id);
+        for (const [id, eng] of enginePool) {
+            if (eng.state === 'processing') {
+                eng.needsRestart = true;
+                console.log('[EnginePool] Deferring engine restart for active conversation', id, '(provider deleted)');
+            } else {
+                killEngine(id, 'provider_deleted_idle_engine', { providerId: req.params.id });
+            }
+        }
         res.json({ ok: true });
     });
     // Get all available models across all enabled providers
@@ -1413,7 +1924,7 @@ function initServer(mainWindow) {
     });
 
     // ===== Skills =====
-    // Paths — userSkillsDir matches engine's skill loading path (~/.claude/skills/)
+    // Paths 鈥?userSkillsDir matches engine's skill loading path (~/.claude/skills/)
     const bundledSkillsDir = path.join(__dirname, 'skills');
     const homeDir = os.homedir();
     const localSkillsDir = path.join(homeDir, '.agents', 'skills');
@@ -1539,7 +2050,7 @@ function initServer(mainWindow) {
         return scanSkillsDir(userSkillsDir, 'user').map(s => ({ ...s, is_example: false }));
     }
 
-    // GET /api/skills — list all skills
+    // GET /api/skills 鈥?list all skills
     server.get('/api/skills', (req, res) => {
         const prefs = loadSkillPrefs();
 
@@ -1578,7 +2089,7 @@ function initServer(mainWindow) {
         });
     });
 
-    // GET /api/skills/:id — skill detail with content
+    // GET /api/skills/:id 鈥?skill detail with content
     server.get('/api/skills/:id', (req, res) => {
         const { id } = req.params;
         const prefs = loadSkillPrefs();
@@ -1608,7 +2119,7 @@ function initServer(mainWindow) {
         res.status(404).json({ error: 'Skill not found' });
     });
 
-    // GET /api/skills/:id/file — get content of a specific file within a skill
+    // GET /api/skills/:id/file 鈥?get content of a specific file within a skill
     server.get('/api/skills/:id/file', (req, res) => {
         const { id } = req.params;
         const filePath = req.query.path;
@@ -1639,7 +2150,7 @@ function initServer(mainWindow) {
         }
     });
 
-    // POST /api/skills — create user skill as ~/.claude/skills/skill-name/SKILL.md
+    // POST /api/skills 鈥?create user skill as ~/.claude/skills/skill-name/SKILL.md
     server.post('/api/skills', (req, res) => {
         const { name, description, content } = req.body;
         if (!name) return res.status(400).json({ error: 'Name is required' });
@@ -1663,7 +2174,7 @@ function initServer(mainWindow) {
         res.json({ id, name, description: description || '', content: content || '', is_example: false, source_dir: slug, source: 'user', enabled: true });
     });
 
-    // PATCH /api/skills/:id — update user skill (writes SKILL.md)
+    // PATCH /api/skills/:id 鈥?update user skill (writes SKILL.md)
     server.patch('/api/skills/:id', (req, res) => {
         const { id } = req.params;
         // Only user skills (source=user) are editable
@@ -1686,7 +2197,7 @@ function initServer(mainWindow) {
         }
     });
 
-    // DELETE /api/skills/:id — delete user skill (removes directory)
+    // DELETE /api/skills/:id 鈥?delete user skill (removes directory)
     server.delete('/api/skills/:id', (req, res) => {
         const { id } = req.params;
         const userSkills = loadUserSkills();
@@ -1704,7 +2215,7 @@ function initServer(mainWindow) {
         res.json({ ok: true });
     });
 
-    // PATCH /api/skills/:id/toggle — toggle enabled state
+    // PATCH /api/skills/:id/toggle 鈥?toggle enabled state
     server.patch('/api/skills/:id/toggle', (req, res) => {
         const { id } = req.params;
         const { enabled } = req.body;
@@ -1759,9 +2270,9 @@ You have the following skills available. When a user's request matches a skill's
         return block;
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  GITHUB CONNECTOR — OAuth + API
-    // ═══════════════════════════════════════════════════════════════
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    //  GITHUB CONNECTOR 鈥?OAuth + API
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
     // GitHub OAuth App credentials (register at https://github.com/settings/developers)
     // Callback URL must be: http://127.0.0.1:30080/api/github/callback
@@ -1784,7 +2295,7 @@ You have the following skills available. When a user's request matches a skill's
         try { fs.unlinkSync(githubTokenPath); } catch (_) {}
     }
 
-    // GET /api/github/status — check connection status
+    // GET /api/github/status 鈥?check connection status
     server.get('/api/github/status', async (req, res) => {
         const token = loadGithubToken();
         if (!token || !token.access_token) return res.json({ connected: false });
@@ -1795,14 +2306,14 @@ You have the following skills available. When a user's request matches a skill's
         res.json({ connected: false });
     });
 
-    // GET /api/github/auth-url — return OAuth authorize URL
+    // GET /api/github/auth-url 鈥?return OAuth authorize URL
     server.get('/api/github/auth-url', (req, res) => {
         const state = require('crypto').randomBytes(16).toString('hex');
         const url = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(GITHUB_REDIRECT_URI)}&scope=repo,read:user&state=${state}`;
         res.json({ url, state });
     });
 
-    // GET /api/github/callback — OAuth callback, exchange code for token
+    // GET /api/github/callback 鈥?OAuth callback, exchange code for token
     server.get('/api/github/callback', async (req, res) => {
         const { code } = req.query;
         if (!code) return res.status(400).send('Missing code');
@@ -1852,7 +2363,7 @@ You have the following skills available. When a user's request matches a skill's
         }
     });
 
-    // POST /api/github/disconnect — remove saved token
+    // POST /api/github/disconnect 鈥?remove saved token
     server.post('/api/github/disconnect', (req, res) => {
         clearGithubToken();
         res.json({ ok: true });
@@ -1878,7 +2389,7 @@ You have the following skills available. When a user's request matches a skill's
         });
     }
 
-    // GET /api/github/repos — list user repos
+    // GET /api/github/repos 鈥?list user repos
     server.get('/api/github/repos', async (req, res) => {
         const token = loadGithubToken();
         if (!token?.access_token) return res.status(401).json({ error: 'Not connected' });
@@ -1890,7 +2401,7 @@ You have the following skills available. When a user's request matches a skill's
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
-    // GET /api/github/repos/:owner/:repo/contents — browse repo contents
+    // GET /api/github/repos/:owner/:repo/contents 鈥?browse repo contents
     server.get('/api/github/repos/:owner/:repo/contents', async (req, res) => {
         const token = loadGithubToken();
         if (!token?.access_token) return res.status(401).json({ error: 'Not connected' });
@@ -1905,7 +2416,7 @@ You have the following skills available. When a user's request matches a skill's
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
-    // GET /api/github/search — search code across repos
+    // GET /api/github/search 鈥?search code across repos
     server.get('/api/github/search', async (req, res) => {
         const token = loadGithubToken();
         if (!token?.access_token) return res.status(401).json({ error: 'Not connected' });
@@ -1917,13 +2428,13 @@ You have the following skills available. When a user's request matches a skill's
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
-    // ═══════════════════════════════════════════════════════════════
-    //  CHAT ENDPOINT — Claude Code Engine via Bun CLI subprocess
-    // ═══════════════════════════════════════════════════════════════
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    //  CHAT ENDPOINT 鈥?Claude Code Engine via Bun CLI subprocess
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
     const { spawn } = require('child_process');
 
-    // Resolve engine path — in packaged app, engine is in resources/engine
+    // Resolve engine path 鈥?in packaged app, engine is in resources/engine
     const isPacked = app.isPackaged;
     const engineDir = isPacked
         ? path.join(process.resourcesPath, 'engine')
@@ -1931,7 +2442,7 @@ You have the following skills available. When a user's request matches a skill's
     const engineCli = path.join(engineDir, 'src', 'entrypoints', 'cli.tsx');
     const engineEnv = path.join(engineDir, '.env');
 
-    // Resolve Bun executable: bundled → user-installed → PATH
+    // Resolve Bun executable: bundled 鈫?user-installed 鈫?PATH
     function findBunExe() {
         const bundled = path.join(engineDir, 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun');
         if (fs.existsSync(bundled)) return bundled;
@@ -1997,7 +2508,7 @@ You have the following skills available. When a user's request matches a skill's
         let assistantText = '';
         let thinkingText = '';
         const contentBlocks = []; // accumulate full content blocks
-        const blockAccumulators = {}; // index → { type, data }
+        const blockAccumulators = {}; // index 鈫?{ type, data }
         let stopReason = null;
         let usage = {};
 
@@ -2006,12 +2517,10 @@ You have the following skills available. When a user's request matches a skill's
             if (done) break;
 
             sseBuffer += decoder.decode(value, { stream: true });
-            const lines = sseBuffer.split('\n');
-            sseBuffer = lines.pop() || '';
+            const consumed = consumeSSEPayloads(sseBuffer);
+            sseBuffer = consumed.remainder;
 
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const data = line.slice(6).trim();
+            for (const data of consumed.payloads) {
                 if (data === '[DONE]') continue;
 
                 let parsed;
@@ -2026,7 +2535,7 @@ You have the following skills available. When a user's request matches a skill's
                         } else if (block.type === 'thinking') {
                             blockAccumulators[idx] = { type: 'thinking', thinking: '' };
                         } else if (block.type === 'tool_use') {
-                            blockAccumulators[idx] = { type: 'tool_use', id: block.id, name: block.name, inputJson: '' };
+                            blockAccumulators[idx] = { type: 'tool_use', id: block.id, name: block.name, inputJson: (block.input && Object.keys(block.input).length > 0) ? JSON.stringify(block.input) : '' };
                         }
                         break;
                     }
@@ -2039,7 +2548,7 @@ You have the following skills available. When a user's request matches a skill's
                         if (delta.type === 'text_delta' && delta.text) {
                             acc.text += delta.text;
                             assistantText += delta.text;
-                            // Forward to frontend — REAL streaming!
+                            // Forward to frontend 鈥?REAL streaming!
                             sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: delta.text } });
                         } else if (delta.type === 'thinking_delta' && delta.thinking) {
                             acc.thinking += delta.thinking;
@@ -2088,10 +2597,35 @@ You have the following skills available. When a user's request matches a skill's
     const enginePool = new Map();
     const HIDDEN_TOOLS = new Set(['EnterWorktree', 'ExitWorktree', 'TodoWrite', 'WebSearch', 'WebFetch']);
 
-    function killEngine(convId) {
+    function summarizeEngine(eng) {
+        if (!eng) return 'null';
+        return JSON.stringify({
+            convId: eng.convId,
+            state: eng.state,
+            modelId: eng.modelId,
+            needsRestart: !!eng.needsRestart,
+            ready: !!eng.ready,
+            pid: eng.child && eng.child.pid,
+            killed: !!(eng.child && eng.child.killed),
+            exitCode: eng.child ? eng.child.exitCode : undefined,
+            hasTurn: !!eng.turn,
+            sessionId: eng.sessionId || null,
+        });
+    }
+    function summarizeEnginePool() {
+        return Array.from(enginePool.values()).map(summarizeEngine).join(' | ') || '(empty)';
+    }
+    function killEngine(convId, reason, extra) {
         const eng = enginePool.get(convId);
         if (!eng) return;
-        console.log('[EnginePool] Killing engine for', convId);
+        const stack = new Error().stack || '';
+        const stackLines = stack.split('\n').slice(2, 5).map(s => s.trim()).join(' <= ');
+        console.log('[EnginePool] Killing engine for', convId,
+            '| reason=', reason || 'unspecified',
+            extra ? '| extra=' + JSON.stringify(extra).slice(0, 500) : '',
+            '| engine=', summarizeEngine(eng),
+            '| pool=', summarizeEnginePool(),
+            '| caller=', stackLines);
         try { eng.child.stdin.end(); } catch (_) {}
         try { eng.child.kill(); } catch (_) {}
         enginePool.delete(convId);
@@ -2104,7 +2638,7 @@ You have the following skills available. When a user's request matches a skill's
             if (eng.state === 'processing') continue;
             if (eng.lastUsed < oldestTime) { oldestTime = eng.lastUsed; oldestId = id; }
         }
-        if (oldestId) killEngine(oldestId);
+        if (oldestId) killEngine(oldestId, 'evict_oldest_idle_engine', { oldestTime, poolSize: enginePool.size });
     }
     function isEngineAlive(eng) { return eng && eng.child && !eng.child.killed && eng.child.exitCode === null; }
 
@@ -2134,7 +2668,7 @@ You have the following skills available. When a user's request matches a skill's
                             }
                         }
                     }
-                    // Only list filenames in the prompt — model reads files on-demand via Read tool
+                    // Only list filenames in the prompt 鈥?model reads files on-demand via Read tool
                     const textExts = ['.txt', '.md', '.json', '.xml', '.yaml', '.yml', '.csv', '.html', '.css', '.js', '.ts', '.tsx', '.jsx', '.py', '.java', '.c', '.cpp', '.h', '.go', '.rs', '.rb', '.php', '.sql', '.sh', '.lua', '.r'];
                     let c = '\n\n<project_knowledge_base>\nThe following project files are available in the workspace. Read them when needed:\n';
                     for (const pf of pFiles) {
@@ -2161,8 +2695,22 @@ You have the following skills available. When a user's request matches a skill's
     function handleTurnEvent(engine, convId, conv, evt) {
         const turn = engine.turn;
         if (!turn || !turn.sendSSE) return;
+        refreshTurnActivityTimeout(engine, convId, conv, evt.type + (evt.subtype ? ':' + evt.subtype : ''));
         const sendSSE = turn.sendSSE;
-        const ensureStart = (id) => { if (!turn.sentToolStarts.has(id)) { var t = turn.toolCalls.get(id); if (t && !HIDDEN_TOOLS.has(t.name)) { turn.sentToolStarts.add(id); sendSSE({ type: 'tool_use_start', tool_use_id: t.id, tool_name: t.name, tool_input: t.input || {} }); } } };
+        const summarizeToolInputForLog = (toolName, input) => {
+            if (!input || typeof input !== 'object') return '{}';
+            if (toolName === 'Write') return JSON.stringify({ file_path: input.file_path || '', contentLen: typeof input.content === 'string' ? input.content.length : null });
+            if (toolName === 'Edit') return JSON.stringify({
+                file_path: input.file_path || '',
+                replace_all: !!input.replace_all,
+                oldLen: typeof input.old_string === 'string' ? input.old_string.length : null,
+                newLen: typeof input.new_string === 'string' ? input.new_string.length : null,
+            });
+            if (toolName === 'Read') return JSON.stringify({ file_path: input.file_path || '', offset: input.offset || null, limit: input.limit || null });
+            if (toolName === 'Bash') return JSON.stringify({ commandLen: typeof input.command === 'string' ? input.command.length : null, timeout: input.timeout || null });
+            return JSON.stringify(input).slice(0, 200);
+        };
+        const ensureStart = (id) => { if (!turn.sentToolStarts.has(id)) { var t = turn.toolCalls.get(id); if (t && !HIDDEN_TOOLS.has(t.name)) { turn.sentToolStarts.add(id); sendSSE({ type: 'tool_use_start', tool_use_id: t.id, tool_name: t.name, tool_input: t.input || {}, textBefore: t.textBefore || '' }); } } };
 
         if (evt.type === 'stream_event' && evt.event) {
             var se = evt.event;
@@ -2180,7 +2728,7 @@ You have the following skills available. When a user's request matches a skill's
                 if (tc) { tc.input = block.input; } else { tc = { id: block.id, name: block.name, input: block.input, status: 'running', textBefore: turn.pendingWorkText.trim() }; turn.toolCalls.set(block.id, tc); turn.toolCallOrder.push(block.id); turn.pendingWorkText = ''; }
                 if (block.name === 'WebSearch' && !turn.sentToolStarts.has(block.id)) { turn.sentToolStarts.add(block.id); sendSSE({ type: 'status', message: 'Searching: ' + ((block.input && block.input.query) || 'the web') }); }
                 else if (block.name === 'WebFetch' && !turn.sentToolStarts.has(block.id)) { turn.sentToolStarts.add(block.id); sendSSE({ type: 'status', message: 'Fetching: ' + ((block.input && block.input.url) || '') }); }
-                else if (!turn.sentToolStarts.has(block.id) && !HIDDEN_TOOLS.has(block.name)) { turn.sentToolStarts.add(block.id); sendSSE({ type: 'tool_use_start', tool_use_id: block.id, tool_name: block.name, tool_input: block.input }); console.log('[Tool]', block.name, JSON.stringify(block.input || {}).slice(0, 120)); }
+                else if (!turn.sentToolStarts.has(block.id) && !HIDDEN_TOOLS.has(block.name)) { turn.sentToolStarts.add(block.id); sendSSE({ type: 'tool_use_start', tool_use_id: block.id, tool_name: block.name, tool_input: block.input, textBefore: (tc && tc.textBefore) || '' }); console.log('[Tool]', block.name, JSON.stringify(block.input || {}).slice(0, 120)); }
             }
         }
         else if (evt.type === 'user' && evt.message && evt.message.content) {
@@ -2190,6 +2738,7 @@ You have the following skills available. When a user's request matches a skill's
                 var tc3 = turn.toolCalls.get(cb.tool_use_id), tn = tc3 ? tc3.name : '';
                 var trText = ''; if (typeof cb.content === 'string') trText = cb.content; else if (Array.isArray(cb.content)) trText = cb.content.map(function(x) { return x.text || ''; }).join('');
                 if (tc3) { tc3.status = cb.is_error ? 'error' : 'done'; tc3.result = trText; }
+                if (cb.is_error) console.warn('[ToolError]', tn || '(unknown)', '| conv=', convId, '| input=', summarizeToolInputForLog(tn, tc3 && tc3.input), '| result=', trText.slice(0, 500));
                 turn.lastToolDoneTextLen = turn.assistantText.length;
                 if (tn === 'WebSearch' && trText) { try { var wsQ = ''; var qM = trText.match(/query:\s*"([^"]+)"/); if (qM) wsQ = qM[1]; var wsS = []; var lM = trText.match(/Links:\s*(\[[\s\S]*?\])\s*\n/); if (lM) { try { var lnk = JSON.parse(lM[1]); if (Array.isArray(lnk)) wsS = lnk.filter(function(l){return l.url;}).map(function(l){return {url:l.url,title:l.title||''};}); } catch(_){} } if (wsS.length>0&&wsQ) { sendSSE({type:'search_sources',sources:wsS,query:wsQ}); turn.searchLogs.push({query:wsQ,results:wsS}); } } catch(_){} }
                 if (!HIDDEN_TOOLS.has(tn)) { ensureStart(cb.tool_use_id); sendSSE({ type: 'tool_use_done', tool_use_id: cb.tool_use_id, content: trText.slice(0, 50000), is_error: cb.is_error || false }); }
@@ -2199,6 +2748,7 @@ You have the following skills available. When a user's request matches a skill's
             var resultText = typeof evt.content === 'string' ? evt.content : Array.isArray(evt.content) ? evt.content.map(function(b){return b.text||'';}).join('') : '';
             var tc2 = turn.toolCalls.get(evt.tool_use_id), toolName = tc2 ? tc2.name : '';
             if (tc2) { tc2.status = evt.is_error ? 'error' : 'done'; tc2.result = resultText; }
+            if (evt.is_error) console.warn('[ToolError]', toolName || '(unknown)', '| conv=', convId, '| input=', summarizeToolInputForLog(toolName, tc2 && tc2.input), '| result=', resultText.slice(0, 500));
             if (toolName === 'WebSearch' && resultText) { try { var qm2=resultText.match(/query:\s*"([^"]+)"/); var lm2=resultText.match(/Links:\s*(\[[\s\S]*?\])\s*\n/); if(qm2&&lm2){var lk2=JSON.parse(lm2[1]); var sr=lk2.filter(function(l){return l.url;}).map(function(l){return{url:l.url,title:l.title||''};});if(sr.length>0)sendSSE({type:'search_sources',sources:sr,query:qm2[1]});} } catch(_){} }
             if (toolName === 'Write' && tc2 && tc2.input && tc2.input.file_path) { var prevId = turn.writtenFiles.get(tc2.input.file_path); if (prevId) turn.toolCalls.delete(prevId); turn.writtenFiles.set(tc2.input.file_path, evt.tool_use_id); }
             if (!HIDDEN_TOOLS.has(toolName)) { ensureStart(evt.tool_use_id); sendSSE({ type: 'tool_use_done', tool_use_id: evt.tool_use_id, content: resultText.slice(0, 50000), is_error: evt.is_error || false }); }
@@ -2224,7 +2774,9 @@ You have the following skills available. When a user's request matches a skill's
 
     function finishTurn(engine, convId, conv) {
         const turn = engine.turn; if (!turn) return;
+        console.log('[Chat] finishTurn', '| conv=', convId, '| engine=', summarizeEngine(engine), '| assistantLen=', (turn.assistantText || '').length, '| thinkingLen=', (turn.thinkingText || '').length, '| toolCalls=', turn.toolCalls.size);
         if (turn.timeoutId) clearTimeout(turn.timeoutId);
+        if (turn.maxTimeoutId) clearTimeout(turn.maxTimeoutId);
         engine.turn = null; engine.state = 'idle';
         if (turn.assistantText || turn.thinkingText || turn.toolCalls.size > 0) {
             db.messages.push({ id: uuidv4(), conversation_id: convId, role: 'assistant', content: JSON.stringify([{ type: 'text', text: turn.assistantText }]), created_at: new Date().toISOString(), thinking: turn.thinkingText || undefined, toolCalls: turn.toolCalls.size > 0 ? turn.toolCallOrder.map(id => turn.toolCalls.get(id)).filter(Boolean) : undefined, toolTextEndOffset: (turn.toolCalls.size > 0 && turn.lastToolDoneTextLen > 0) ? turn.lastToolDoneTextLen : undefined, searchLogs: turn.searchLogs.length > 0 ? turn.searchLogs : undefined });
@@ -2236,6 +2788,55 @@ You have the following skills available. When a user's request matches a skill's
         turn.sendSSE({ type: 'message_stop' });
         endStream(convId);
         if (turn.resolve) turn.resolve();
+    }
+    function failTurnAndRecycleEngine(engine, convId, conv, reason, userError, extra) {
+        const turn = engine && engine.turn;
+        if (!turn) return;
+        const meta = Object.assign({
+            lastActivitySource: turn.lastActivitySource || 'unknown',
+            startedAt: turn.startedAt || null,
+            lastActivityAt: turn.lastActivityAt || null,
+        }, extra || {});
+        console.error('[Chat] Aborting turn and recycling engine',
+            '| conv=', convId,
+            '| reason=', reason || 'unspecified',
+            '| meta=', JSON.stringify(meta).slice(0, 500));
+        if (userError) {
+            try { turn.sendSSE({ type: 'error', error: userError }); } catch (_) {}
+        }
+        finishTurn(engine, convId, conv);
+        killEngine(convId, reason || 'turn_aborted', meta);
+    }
+    function refreshTurnActivityTimeout(engine, convId, conv, source) {
+        const turn = engine && engine.turn;
+        if (!turn) return;
+        turn.lastActivityAt = Date.now();
+        turn.lastActivitySource = source || 'unknown';
+        const TURN_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+        if (turn.timeoutId) clearTimeout(turn.timeoutId);
+        turn.timeoutId = setTimeout(() => {
+            if (engine.state === 'processing' && engine.turn === turn) {
+                const idleMs = Date.now() - (turn.lastActivityAt || turn.startedAt || Date.now());
+                console.error('[Chat] Turn inactivity timeout after ' + Math.round(idleMs / 1000) + 's for', convId, '| lastActivitySource=', turn.lastActivitySource || 'unknown');
+                failTurnAndRecycleEngine(
+                    engine,
+                    convId,
+                    conv,
+                    'turn_inactivity_timeout',
+                    'Request timed out due to inactivity. The model or tool execution stopped producing events. Please try again.',
+                    { idleMs }
+                );
+            }
+        }, TURN_INACTIVITY_TIMEOUT_MS);
+    }
+    async function awaitEngineReady(engine, convId) {
+        if (!engine || engine.ready) return;
+        console.log('[EnginePool] Waiting for engine init', '| conv=', convId, '| pid=', engine.child && engine.child.pid);
+        await Promise.race([
+            engine.readyPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Engine init timeout')), 15000))
+        ]);
+        console.log('[EnginePool] Engine ready', '| conv=', convId, '| pid=', engine.child && engine.child.pid);
     }
 
     function spawnPersistentEngine(convId, conv, config) {
@@ -2255,34 +2856,73 @@ You have the following skills available. When a user's request matches a skill's
         console.log('[EnginePool] Spawning persistent engine, conv=' + convId + ' model=' + modelId + ' session=' + (conv.claude_session_id || 'new'));
         const { spawn } = require('child_process');
         const child = spawn(bunExePath, cliArgs, { cwd: conv.workspace_path, env: envVars, stdio: ['pipe', 'pipe', 'pipe'] });
-        const engine = { child, convId, modelId, apiKey, baseUrl, apiFormat, lastUsed: Date.now(), sessionId: conv.claude_session_id, state: 'idle', buf: '', turn: null };
+        let resolveReady;
+        const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
+        const engine = { child, convId, modelId, apiKey, baseUrl, apiFormat, lastUsed: Date.now(), sessionId: conv.claude_session_id, state: 'idle', buf: '', turn: null, needsRestart: false, ready: false, readyPromise, resolveReady };
         activeChildren.set(convId, child);
 
+        const handleEngineStdoutLine = (line) => {
+            if (!line || !line.trim()) return;
+            let evt;
+            try {
+                evt = JSON.parse(line);
+            } catch {
+                if (engine.state === 'processing') console.warn('[EnginePool] Non-JSON stdout while processing conv=' + convId + ':', line.slice(0, 300));
+                return;
+            }
+            if (evt.session_id && !engine.sessionId) { engine.sessionId = evt.session_id; conv.claude_session_id = engine.sessionId; saveDb(); }
+            if (engine.turn) refreshTurnActivityTimeout(engine, convId, conv, 'stdout:' + evt.type + (evt.subtype ? ':' + evt.subtype : ''));
+            if (evt.type !== 'stream_event') console.log('[Engine-evt]', evt.type, evt.subtype || '', evt.tool_use_id ? 'tool_id=' + evt.tool_use_id : '');
+            if (evt.type === 'system' && evt.subtype === 'init') {
+                engine.ready = true;
+                if (engine.resolveReady) { try { engine.resolveReady(); } catch (_) {} engine.resolveReady = null; }
+                console.log('[EnginePool] Engine init event for', convId);
+                return;
+            }
+            if (evt.type === 'result') { if (engine.turn) { if (!engine.turn.assistantText && evt.result) engine.turn.assistantText = typeof evt.result === 'string' ? evt.result : ''; finishTurn(engine, convId, conv); } return; }
+            if (!engine.turn) return;
+            handleTurnEvent(engine, convId, conv, evt);
+        };
         child.stdout.on('data', (chunk) => {
             engine.buf += chunk.toString('utf8');
             const lines = engine.buf.split('\n'); engine.buf = lines.pop() || '';
-            for (const line of lines) {
-                if (!line.trim()) continue; let evt; try { evt = JSON.parse(line); } catch { continue; }
-                if (evt.session_id && !engine.sessionId) { engine.sessionId = evt.session_id; conv.claude_session_id = engine.sessionId; saveDb(); }
-                if (evt.type !== 'stream_event') console.log('[Engine-evt]', evt.type, evt.subtype || '', evt.tool_use_id ? 'tool_id=' + evt.tool_use_id : '');
-                if (evt.type === 'system' && evt.subtype === 'init') { console.log('[EnginePool] Engine init event for', convId); continue; }
-                if (evt.type === 'result') { if (engine.turn) { if (!engine.turn.assistantText && evt.result) engine.turn.assistantText = typeof evt.result === 'string' ? evt.result : ''; finishTurn(engine, convId, conv); } continue; }
-                if (!engine.turn) continue;
-                handleTurnEvent(engine, convId, conv, evt);
-            }
+            for (const line of lines) handleEngineStdoutLine(line);
         });
         let stderrBuf = '';
         child.stderr.on('data', (c) => { stderrBuf += c.toString('utf8'); });
         child.on('close', (code) => {
+            if (engine.buf && engine.buf.trim()) {
+                handleEngineStdoutLine(engine.buf);
+                engine.buf = '';
+            }
+            if (!engine.ready && engine.resolveReady) { try { engine.resolveReady(); } catch (_) {} engine.resolveReady = null; }
             console.log('[EnginePool] Engine closed, code=' + code + ', conv=' + convId, stderrBuf ? '| stderr: ' + stderrBuf.slice(0, 300) : '');
             if (engine.state === 'processing' && engine.turn) {
                 const turn = engine.turn;
-                if (turn.sendSSE) { if (!turn.assistantText) turn.sendSSE({ type: 'error', error: stderrBuf.slice(0, 300) || 'Engine exit ' + code }); else turn.sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: '\n\n⚠️ Engine exited unexpectedly.' } }); turn.sendSSE({ type: 'message_stop' }); endStream(convId); }
-                if (turn.resolve) turn.resolve();
+                if (turn.sendSSE) {
+                    if (!turn.assistantText) turn.sendSSE({ type: 'error', error: stderrBuf.slice(0, 300) || 'Engine exit ' + code });
+                    else {
+                        const warningText = '\n\n[Engine exited unexpectedly.]';
+                        turn.assistantText += warningText;
+                        turn.sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: warningText } });
+                    }
+                }
+                finishTurn(engine, convId, conv);
             }
             enginePool.delete(convId); activeChildren.delete(convId);
         });
-        child.on('error', (err) => { console.error('[EnginePool] Error:', err.message); if (engine.state === 'processing' && engine.turn && engine.turn.resolve) engine.turn.resolve(); enginePool.delete(convId); activeChildren.delete(convId); });
+        child.on('error', (err) => {
+            console.error('[EnginePool] Error:', err.message);
+            if (!engine.ready && engine.resolveReady) { try { engine.resolveReady(); } catch (_) {} engine.resolveReady = null; }
+            if (engine.state === 'processing' && engine.turn) {
+                if (engine.turn.sendSSE) engine.turn.sendSSE({ type: 'error', error: err.message || 'Engine error' });
+                finishTurn(engine, convId, conv);
+            }
+            enginePool.delete(convId); activeChildren.delete(convId);
+        });
+        child.on('spawn', () => {
+            console.log('[EnginePool] Child spawned', '| conv=', convId, '| pid=', child.pid, '| model=', modelId);
+        });
         enginePool.set(convId, engine);
         return engine;
     }
@@ -2291,7 +2931,9 @@ You have the following skills available. When a user's request matches a skill's
     server.post('/api/conversations/:id/warm', (req, res) => {
         const convId = req.params.id;
         const existing = enginePool.get(convId);
-        if (existing && isEngineAlive(existing)) { existing.lastUsed = Date.now(); return res.json({ ok: true, cached: true, state: existing.state }); }
+        console.log('[Warm] Request for', convId, '| existing=', summarizeEngine(existing), '| pool=', summarizeEnginePool());
+        if (existing && isEngineAlive(existing) && !existing.needsRestart) { existing.lastUsed = Date.now(); return res.json({ ok: true, cached: true, state: existing.state }); }
+        if (existing && existing.needsRestart) killEngine(convId, 'warm_existing_engine_marked_needs_restart');
         const conv = db.conversations.find(c => c.id === convId);
         if (!conv) return res.status(404).json({ error: 'Not found' });
         const { env_token, env_base_url, user_mode, user_profile } = req.body || {};
@@ -2307,6 +2949,13 @@ You have the following skills available. When a user's request matches a skill's
         const { conversation_id, message, attachments, env_token, env_base_url, user_mode, user_profile } = req.body;
         const conv = db.conversations.find(c => c.id === conversation_id);
         if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+        console.log('[Chat] Incoming request',
+            '| conv=', conversation_id,
+            '| msgLen=', (message || '').length,
+            '| attachments=', Array.isArray(attachments) ? attachments.length : 0,
+            '| user_mode=', user_mode,
+            '| model=', conv.model,
+            '| pool=', summarizeEnginePool());
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
@@ -2315,7 +2964,7 @@ You have the following skills available. When a user's request matches a skill's
         const sendSSE = (data) => { var stream = activeStreams.get(conversation_id); if (stream) { stream.events.push(data); var line = 'data: ' + JSON.stringify(data) + '\n\n'; var arr = Array.from(stream.listeners); for (var i = 0; i < arr.length; i++) { try { arr[i].write(line); } catch (_) { stream.listeners.delete(arr[i]); } } } try { res.write('data: ' + JSON.stringify(data) + '\n\n'); } catch (_) {} };
 
         try {
-            // /skill-name is passed as-is to the engine — the engine handles
+            // /skill-name is passed as-is to the engine 鈥?the engine handles
             // slash commands internally (injects SKILL.md content into context).
             // Send a synthetic tool event so the frontend shows "Reading SKILL.md"
             const skillInvokeMatch = message.match(/^\/([a-zA-Z0-9_-]+)(\s|$)/);
@@ -2326,7 +2975,7 @@ You have the following skills available. When a user's request matches a skill's
                 sendSSE({ type: 'tool_use_done', tool_use_id: fakeId, content: `Reading ${skillSlug} SKILL.md`, is_error: false });
             }
 
-            // ── 1. Handle attachments: copy to workspace, append references to prompt ──
+            // 鈹€鈹€ 1. Handle attachments: copy to workspace, append references to prompt 鈹€鈹€
             let finalPrompt = message;
             const imageFileNames = []; // image files copied to workspace
 
@@ -2347,7 +2996,7 @@ You have the following skills available. When a user's request matches a skill's
                         const fn = att.fileName || path.basename(srcPath);
                         try { fs.copyFileSync(srcPath, path.join(conv.workspace_path, fn)); copiedFiles.push(fn); } catch (_) {}
 
-                        // Detect images → read base64 for proxy injection
+                        // Detect images 鈫?read base64 for proxy injection
                         const ext = path.extname(fn).toLowerCase();
                         if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
                             console.log('[Chat] Image copied to workspace:', fn);
@@ -2371,20 +3020,20 @@ You have the following skills available. When a user's request matches a skill's
                     // Images are injected directly into the API request via the proxy,
                     // but we also mention them here so the model knows they exist as files.
                     if (imageFileNames.length > 0) {
-                        finalPrompt += '\n\n[The user attached image(s): ' + imageFileNames.join(', ') + '. The image(s) are included in this message — you can see them directly.]';
+                        finalPrompt += '\n\n[The user attached image(s): ' + imageFileNames.join(', ') + '. The image(s) are included in this message 鈥?you can see them directly.]';
                         const nonImages = copiedFiles.filter(f => !imageFileNames.includes(f));
                         if (nonImages.length > 0) {
-                            finalPrompt += '\n[Other attached files — read only when needed:]\n';
+                            finalPrompt += '\n[Other attached files 鈥?read only when needed:]\n';
                             for (const fn of nonImages) finalPrompt += `- ./${fn}\n`;
                         }
                     } else {
-                        finalPrompt += '\n\n[Attached files in workspace — read only when needed:]\n';
+                        finalPrompt += '\n\n[Attached files in workspace 鈥?read only when needed:]\n';
                         for (const fn of copiedFiles) finalPrompt += `- ./${fn}\n`;
                     }
                 }
             }
 
-            // ── 2. Save user message ──
+            // 鈹€鈹€ 2. Save user message 鈹€鈹€
             db.messages.push({
                 id: uuidv4(), conversation_id, role: 'user',
                 content: JSON.stringify([{ type: 'text', text: message }]),
@@ -2393,10 +3042,19 @@ You have the following skills available. When a user's request matches a skill's
             });
             saveDb();
 
-            // ── 3. Get or create persistent engine ──
+            // 鈹€鈹€ 3. Get or create persistent engine 鈹€鈹€
             const config = resolveChatConfig(conv, user_mode, env_token, env_base_url);
             let engine = enginePool.get(conversation_id);
-            if (engine && (!isEngineAlive(engine) || engine.modelId !== config.modelId)) { killEngine(conversation_id); engine = null; }
+            console.log('[Chat] Engine lookup for', conversation_id, '| existing=', summarizeEngine(engine), '| requestedModel=', config.modelId);
+            if (engine && (!isEngineAlive(engine) || engine.modelId !== config.modelId || engine.needsRestart)) {
+                killEngine(conversation_id, 'chat_existing_engine_invalid_or_stale', {
+                    isAlive: !!isEngineAlive(engine),
+                    currentModel: engine && engine.modelId,
+                    requestedModel: config.modelId,
+                    needsRestart: !!(engine && engine.needsRestart),
+                });
+                engine = null;
+            }
             if (!engine) {
                 const sysPrompt = buildChatSystemPrompt(conv, user_mode, user_profile);
                 engine = spawnPersistentEngine(conversation_id, conv, { ...config, sysPrompt });
@@ -2406,9 +3064,9 @@ You have the following skills available. When a user's request matches a skill's
                 // Wait briefly in case the previous turn is about to finish
                 await new Promise(r => setTimeout(r, 1000));
                 if (engine.state === 'processing') {
-                    // Previous turn is stuck — kill the engine and spawn a fresh one
-                    console.warn('[Chat] Engine stuck in processing state for', conversation_id, '— killing and respawning');
-                    killEngine(conversation_id);
+                    // Previous turn is stuck 鈥?kill the engine and spawn a fresh one
+                    console.warn('[Chat] Engine stuck in processing state for', conversation_id, '鈥?killing and respawning');
+                    killEngine(conversation_id, 'chat_previous_turn_stuck_processing', { existing: summarizeEngine(engine) });
                     engine = null;
                     const sysPrompt = buildChatSystemPrompt(conv, user_mode, user_profile);
                     engine = spawnPersistentEngine(conversation_id, conv, { ...config, sysPrompt });
@@ -2416,9 +3074,10 @@ You have the following skills available. When a user's request matches a skill's
                 }
             }
 
-            // ── 4. Start new turn ──
+            // 鈹€鈹€ 4. Start new turn 鈹€鈹€
             engine.state = 'processing';
             engine.lastUsed = Date.now();
+            console.log('[Chat] Turn starting', '| conv=', conversation_id, '| engine=', summarizeEngine(engine), '| promptLen=', finalPrompt.length);
             if (config.apiFormat === 'openai' && proxyPort > 0) {
                 proxyTarget = { apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.modelId, format: 'openai', conversationId: conversation_id };
             }
@@ -2430,27 +3089,45 @@ You have the following skills available. When a user's request matches a skill's
                 message: message,
                 apiKey: config.apiKey, baseUrl: config.baseUrl, apiFormat: config.apiFormat,
                 resolve: null,
+                startedAt: Date.now(),
+                lastActivityAt: Date.now(),
+                lastActivitySource: 'turn_start',
             };
 
             // Write user message to stdin (stream-json format)
             engine.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: finalPrompt }, uuid: uuidv4() }) + '\n');
 
-            // Wait for turn to complete, with a 3-minute timeout.
-            // If the upstream API hangs (e.g. broken proxy), this prevents the engine
-            // from being stuck in 'processing' forever.
-            const TURN_TIMEOUT_MS = 3 * 60 * 1000;
+            // Wait for turn to complete. Use an inactivity timeout so long-running
+            // tasks can continue while they are still producing progress events.
+            // Keep a separate hard cap as a final safety valve.
+            const TURN_MAX_TIMEOUT_MS = 30 * 60 * 1000;
+            // Send periodic heartbeat to keep SSE connection alive during long waits
+            const heartbeatId = setInterval(() => {
+                if (engine.state === 'processing') {
+                    try { sendSSE({ type: 'heartbeat' }); } catch (_) {}
+                }
+            }, 15000);
             await new Promise(resolve => {
                 engine.turn.resolve = resolve;
-                engine.turn.timeoutId = setTimeout(() => {
+                refreshTurnActivityTimeout(engine, conversation_id, conv, 'turn_start');
+                engine.turn.maxTimeoutId = setTimeout(() => {
                     if (engine.state === 'processing' && engine.turn) {
-                        console.error('[Chat] Turn timed out after ' + (TURN_TIMEOUT_MS / 1000) + 's for', conversation_id);
-                        engine.turn.sendSSE({ type: 'error', error: 'Request timed out — the API endpoint may be unresponsive. Please try again.' });
-                        finishTurn(engine, conversation_id, conv);
+                        console.error('[Chat] Turn hard timeout after ' + (TURN_MAX_TIMEOUT_MS / 1000) + 's for', conversation_id);
+                        failTurnAndRecycleEngine(
+                            engine,
+                            conversation_id,
+                            conv,
+                            'turn_hard_timeout',
+                            'Request exceeded the maximum runtime. Please try again.',
+                            { maxRuntimeMs: TURN_MAX_TIMEOUT_MS }
+                        );
                     }
-                }, TURN_TIMEOUT_MS);
+                }, TURN_MAX_TIMEOUT_MS);
             });
+            clearInterval(heartbeatId);
             if (engine.turn && engine.turn.timeoutId) clearTimeout(engine.turn.timeoutId);
-        } catch (err) {
+            if (engine.turn && engine.turn.maxTimeoutId) clearTimeout(engine.turn.maxTimeoutId);
+                    } catch (err) {
             pendingImageBlocks.delete(conversation_id);
             console.error('[Chat] Error:', (err.message || '').slice(0, 300));
             sendSSE({ type: 'error', error: err.message || 'Engine error' });
@@ -2463,3 +3140,4 @@ You have the following skills available. When a user's request matches a skill's
 }
 
 module.exports = { initServer, enableNodeModeForChildProcesses };
+

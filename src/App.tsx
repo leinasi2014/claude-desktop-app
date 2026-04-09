@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { HashRouter, Routes, Route, Navigate, useLocation, useParams, useNavigate } from 'react-router-dom';
-import { FileText, ChevronDown, Trash, Pencil, Star, BellRing, Menu, Folder } from 'lucide-react';
+import { FileText, ChevronDown, Trash, Pencil, Star, BellRing, Menu, Folder, ArrowLeft, ArrowRight } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import MainContent from './components/MainContent';
 import { IconSidebarToggle } from './components/Icons';
@@ -25,6 +25,23 @@ import AdminAnnouncements from './components/admin/AdminAnnouncements';
 import ChatsPage from './components/ChatsPage';
 import CustomizePage from './components/CustomizePage';
 import ProjectsPage from './components/ProjectsPage';
+
+const Tooltip = ({ children, text, shortcut }: { children: React.ReactNode; text: string; shortcut?: string }) => {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 z-[200] pointer-events-none">
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium whitespace-nowrap bg-[#2a2a2a] text-white dark:bg-[#e8e8e8] dark:text-[#1a1a1a] shadow-lg">
+            <span>{text}</span>
+            {shortcut && <span className="opacity-60 text-[11px]">{shortcut}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 const ChatHeader = ({
   title,
@@ -278,6 +295,49 @@ const Layout = () => {
   }, []);
 
   const location = useLocation();
+  const navigate = useNavigate();
+
+  // Navigation history for back/forward buttons
+  const [navHistory, setNavHistory] = useState<string[]>([location.pathname + location.search + location.hash]);
+  const [navIndex, setNavIndex] = useState(0);
+  const isNavAction = useRef(false);
+
+  useEffect(() => {
+    const fullPath = location.pathname + location.search;
+    if (isNavAction.current) {
+      isNavAction.current = false;
+      return;
+    }
+    setNavHistory(prev => {
+      const trimmed = prev.slice(0, navIndex + 1);
+      if (trimmed[trimmed.length - 1] === fullPath) return trimmed;
+      return [...trimmed, fullPath];
+    });
+    setNavIndex(prev => {
+      const trimmed = navHistory.slice(0, prev + 1);
+      if (trimmed[trimmed.length - 1] === fullPath) return prev;
+      return trimmed.length;
+    });
+  }, [location.pathname, location.search]);
+
+  const canGoBack = navIndex > 0;
+  const canGoForward = navIndex < navHistory.length - 1;
+
+  const handleNavBack = () => {
+    if (!canGoBack) return;
+    isNavAction.current = true;
+    const newIndex = navIndex - 1;
+    setNavIndex(newIndex);
+    navigate(navHistory[newIndex]);
+  };
+
+  const handleNavForward = () => {
+    if (!canGoForward) return;
+    isNavAction.current = true;
+    const newIndex = navIndex + 1;
+    setNavIndex(newIndex);
+    navigate(navHistory[newIndex]);
+  };
 
   useEffect(() => {
     setShowSettings(false);
@@ -507,20 +567,74 @@ const Layout = () => {
             className="h-full flex items-center pr-2 gap-0.5"
             style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', paddingLeft: isMac ? '78px' : '4px' } as React.CSSProperties}
           >
-            <button
-              onClick={() => { }}
-              className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"
-              title="Menu"
-            >
-              <Menu size={18} className="opacity-80" />
-            </button>
-            <button
-              onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-              className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"
-              title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            >
-              <IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" />
-            </button>
+            <Tooltip text="Menu">
+              <button
+                onClick={() => { }}
+                className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"
+              >
+                <Menu size={18} className="opacity-80" />
+              </button>
+            </Tooltip>
+            <Tooltip text={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
+              <button
+                onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"
+              >
+                <IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" />
+              </button>
+            </Tooltip>
+            {canGoBack ? (
+              <Tooltip text="Back">
+                <button
+                  onClick={handleNavBack}
+                  className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+                  style={{ color: '#73726C' }}
+                >
+                  <ArrowLeft size={16} strokeWidth={1.5} />
+                </button>
+              </Tooltip>
+            ) : (
+              <span className="p-1.5" style={{ color: '#B7B5B0' }}>
+                <ArrowLeft size={16} strokeWidth={1.5} />
+              </span>
+            )}
+            {canGoForward ? (
+              <Tooltip text="Forward">
+                <button
+                  onClick={handleNavForward}
+                  className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+                  style={{ color: '#73726C' }}
+                >
+                  <ArrowRight size={16} strokeWidth={1.5} />
+                </button>
+              </Tooltip>
+            ) : (
+              <span className="p-1.5" style={{ color: '#B7B5B0' }}>
+                <ArrowRight size={16} strokeWidth={1.5} />
+              </span>
+            )}
+          </div>
+
+          {/* Center Mode Tabs */}
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center rounded-xl p-0.5"
+            style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', backgroundColor: 'var(--bg-mode-tabs)' } as React.CSSProperties}
+          >
+            <Tooltip text="Chat" shortcut="Ctrl+1">
+              <button className="px-3.5 py-1 text-[13px] font-medium rounded-[10px] text-claude-text shadow-sm transition-colors" style={{ backgroundColor: 'var(--bg-mode-tab-active)', fontFamily: 'Inter, system-ui, -apple-system, sans-serif', letterSpacing: '0.01em' }}>
+                Chat
+              </button>
+            </Tooltip>
+            <Tooltip text="Cowork" shortcut="Ctrl+2">
+              <button className="px-3.5 py-1 text-[13px] font-medium rounded-[10px] text-claude-textSecondary hover:text-claude-text transition-colors" style={{ fontFamily: 'Inter, system-ui, -apple-system, sans-serif', letterSpacing: '0.01em' }}>
+                Cowork
+              </button>
+            </Tooltip>
+            <Tooltip text="Code" shortcut="Ctrl+3">
+              <button className="px-3.5 py-1 text-[13px] font-medium rounded-[10px] text-claude-textSecondary hover:text-claude-text transition-colors" style={{ fontFamily: 'Inter, system-ui, -apple-system, sans-serif', letterSpacing: '0.01em' }}>
+                Code
+              </button>
+            </Tooltip>
           </div>
         </div>
 

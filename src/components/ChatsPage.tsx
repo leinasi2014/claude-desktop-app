@@ -89,6 +89,8 @@ const ChatsPage = () => {
 
   const menuRef = useRef<HTMLDivElement>(null);
   const projectPickerRef = useRef<HTMLDivElement>(null);
+  const projectBtnRef = useRef<HTMLButtonElement>(null);
+  const [pickerPos, setPickerPos] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
     // Inject Spectral font for the title
@@ -212,6 +214,10 @@ const ChatsPage = () => {
         return;
       }
       setProjectList(projects);
+      if (projectBtnRef.current) {
+        const rect = projectBtnRef.current.getBoundingClientRect();
+        setPickerPos({ top: rect.bottom + 6, left: rect.left });
+      }
       setShowProjectPicker(true);
     } catch (err) {
       console.error('Failed to load projects:', err);
@@ -307,18 +313,19 @@ const ChatsPage = () => {
               <span className="text-[13px] text-claude-textSecondary">
                 {selectedChatIds.size} selected
               </span>
-              <div className="flex items-center gap-2 ml-2 relative">
+              <div className="flex items-center gap-2 ml-2">
                 <button
+                  ref={projectBtnRef}
                   className="p-1 text-claude-textSecondary hover:text-claude-text transition-colors"
                   title="Add to project"
                   onClick={handleAddToProject}
                 >
-                  <IconProjects size={20} className="dark:invert" />
+                  <IconProjects size={24} className="dark:invert" />
                 </button>
-                {showProjectPicker && (
+                {showProjectPicker && pickerPos && createPortal(
                   <>
-                    <div className="fixed inset-0 z-40" onClick={() => setShowProjectPicker(false)} />
-                    <div ref={projectPickerRef} className="absolute top-full left-0 mt-1.5 w-[240px] bg-white dark:bg-[#2A2928] border border-claude-border rounded-xl shadow-lg py-1.5 z-50">
+                    <div className="fixed inset-0 z-[90]" onClick={() => setShowProjectPicker(false)} />
+                    <div ref={projectPickerRef} className="fixed w-[240px] bg-white dark:bg-[#2A2928] border border-claude-border rounded-xl shadow-lg py-1.5 z-[100]" style={{ top: pickerPos.top, left: pickerPos.left }}>
                       <div className="px-3 py-2 text-[12px] font-medium text-claude-textSecondary border-b border-claude-border">
                         移动到项目
                       </div>
@@ -332,7 +339,8 @@ const ChatsPage = () => {
                         </button>
                       ))}
                     </div>
-                  </>
+                  </>,
+                  document.body
                 )}
                 <button
                   onClick={handleDeleteSelected}

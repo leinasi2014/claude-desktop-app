@@ -27,6 +27,8 @@
   --bg-claude-input: #FFFFFF;
   --bg-claude-avatar: #333333;
   --text-claude-avatar: #FFFFFF;
+  --bg-mode-tabs: #F0EEE6;
+  --bg-mode-tab-active: #FAF9F5;
 }
 
 .dark {
@@ -42,6 +44,8 @@
   --bg-claude-input: #30302E;
   --bg-claude-avatar: #D4D4D4;
   --text-claude-avatar: #222222;
+  --bg-mode-tabs: #141413;
+  --bg-mode-tab-active: #262624;
   color-scheme: dark;
 }
 

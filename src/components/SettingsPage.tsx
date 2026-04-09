@@ -740,9 +740,9 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                     className="group flex flex-col items-center gap-3"
                   >
                     <div className={`
-                      w-32 h-20 rounded-lg border-2 transition-all relative overflow-hidden flex flex-col shadow-sm
+                      w-32 h-20 rounded-lg border transition-all relative overflow-hidden flex flex-col shadow-sm
                       ${theme === opt.value
-                        ? 'border-[#3b82f6] scale-[1.02]'
+                        ? 'border-[#3b82f6]/80 scale-[1.02]'
                         : 'border-claude-border group-hover:border-[#CCC]'
                       }
                     `}>
@@ -814,9 +814,9 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                     key={opt.value}
                     onClick={() => applyFont(opt.value)}
                     className={`
-                      w-32 flex flex-col items-center gap-2 py-3 px-2 rounded-lg border-2 transition-all
+                      w-32 flex flex-col items-center gap-2 py-3 px-2 rounded-lg border transition-all
                       ${chatFont === opt.value
-                        ? 'border-[#3b82f6] scale-[1.02] bg-claude-input text-claude-text shadow-sm'
+                        ? 'border-[#3b82f6]/80 scale-[1.02] bg-claude-input text-claude-text shadow-sm'
                         : 'border-claude-border bg-claude-input hover:border-[#CCC] text-claude-textSecondary hover:text-claude-text'
                       }
                     `}
@@ -860,7 +860,7 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                     }
                     window.location.reload();
                   }}
-                  className={`flex-1 px-4 py-3 rounded-xl border-2 text-left transition-all ${active ? 'border-blue-500/60 bg-blue-500/5' : 'border-claude-border/60 hover:border-claude-textSecondary/20'
+                  className={`flex-1 px-4 py-3 rounded-xl border text-left transition-all ${active ? 'border-[#3b82f6]/80 bg-blue-500/5' : 'border-claude-border/60 hover:border-claude-textSecondary/20'
                     }`}
                 >
                   <div className={`text-[14px] font-medium ${active ? 'text-claude-text' : 'text-claude-textSecondary'}`}>{opt.label}</div>
