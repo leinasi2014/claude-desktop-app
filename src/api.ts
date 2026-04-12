@@ -8,6 +8,25 @@ function getToken() {
   return localStorage.getItem('auth_token');
 }
 
+// Resolve effective user_mode for a given conversation. If the user has explicitly
+// opted to use a cross-mode model in this conversation (via the cross-mode warning
+// modal in MainContent), the per-conv override takes precedence over the global
+// user_mode. This is what makes "keep using clawparrot opus while in selfhosted
+// mode" work — only that one conv switches its endpoint, the rest stay in the
+// global mode.
+function getUserModeForConversation(conversationId?: string): string {
+  if (conversationId) {
+    try {
+      const raw = localStorage.getItem('cross_mode_overrides');
+      if (raw) {
+        const map = JSON.parse(raw);
+        if (map[conversationId]) return map[conversationId];
+      }
+    } catch {}
+  }
+  return localStorage.getItem('user_mode') || 'clawparrot';
+}
+
 // 通用请求方法
 async function request(path: string, options: RequestInit = {}) {
   const token = getToken();
@@ -636,7 +655,7 @@ export async function answerUserQuestion(
 
 // Pre-warm engine for a conversation (spawn in background before user sends first message)
 export function warmEngine(conversationId: string): void {
-  const userMode = localStorage.getItem('user_mode') || 'clawparrot';
+  const userMode = getUserModeForConversation(conversationId);
   let userProfile: any;
   try {
     const p = JSON.parse(localStorage.getItem('user_profile') || localStorage.getItem('user') || '{}');
@@ -1045,7 +1064,7 @@ export async function sendMessage(
         attachments: attachments || undefined,
         env_token: localStorage.getItem('CUSTOM_API_KEY') || localStorage.getItem('ANTHROPIC_API_KEY') || undefined,
         env_base_url: localStorage.getItem('CUSTOM_BASE_URL') || localStorage.getItem('ANTHROPIC_BASE_URL') || undefined,
-        user_mode: localStorage.getItem('user_mode') || 'clawparrot',
+        user_mode: getUserModeForConversation(conversationId),
         user_profile: (() => {
           try {
             const p = JSON.parse(localStorage.getItem('user_profile') || localStorage.getItem('user') || '{}');

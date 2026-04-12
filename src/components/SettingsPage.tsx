@@ -46,8 +46,6 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sessionId: string } | null>(null);
   const [sendKey, setSendKey] = useState(localStorage.getItem('sendKey') || 'enter'); // enter or ctrl+enter
   const [newlineKey, setNewlineKey] = useState(localStorage.getItem('newlineKey') || (localStorage.getItem('sendKey') === 'enter' ? 'shift_enter' : 'enter'));
-  const [envToken, setEnvToken] = useState(localStorage.getItem('CUSTOM_API_KEY') || '');
-  const [envBaseUrl, setEnvBaseUrl] = useState(localStorage.getItem('CUSTOM_BASE_URL') || '');
 
   const isSelfHosted = localStorage.getItem('user_mode') === 'selfhosted';
 
@@ -574,44 +572,6 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                 placeholder="例如：回答尽量简洁，使用中文，代码注释用英文"
               />
             </div>
-
-            <hr className="border-claude-border" />
-
-            {/* API Settings Section — only for Clawparrot users */}
-            {localStorage.getItem('user_mode') !== 'selfhosted' && <div>
-              <h4 className="text-[14px] font-semibold text-claude-text mb-4">API 设置 (Claude Code Engine)</h4>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">{localStorage.getItem('user_mode') === 'selfhosted' ? 'API Key' : '自定义 API Key（留空则使用账号自带额度）'}</label>
-                  <input
-                    type="text"
-                    value={envToken}
-                    onChange={e => {
-                      setEnvToken(e.target.value);
-                      localStorage.setItem('CUSTOM_API_KEY', e.target.value.trim());
-                    }}
-                    className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all"
-                    placeholder="留空即可，填写后将使用你自己的中转 API"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">自定义 Base URL（配合自定义 Key 使用）</label>
-                  <input
-                    type="text"
-                    value={envBaseUrl}
-                    onChange={e => {
-                      setEnvBaseUrl(e.target.value);
-                      localStorage.setItem('CUSTOM_BASE_URL', e.target.value.trim());
-                    }}
-                    className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all"
-                    placeholder="留空即可，填写后将使用你指定的 API 地址"
-                  />
-                </div>
-              </div>
-            </div>}
-
 
           </div>
         </section>

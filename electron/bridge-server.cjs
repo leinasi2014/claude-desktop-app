@@ -3692,12 +3692,24 @@ You have the following skills available. When a user's request matches a skill's
             const config = resolveChatConfig(conv, user_mode, env_token, env_base_url);
             let engine = enginePool.get(conversation_id);
             console.log('[Chat] Engine lookup for', conversation_id, '| existing=', summarizeEngine(engine), '| requestedModel=', config.modelId);
-            if (engine && (!isEngineAlive(engine) || engine.modelId !== config.modelId || engine.needsRestart)) {
+            // Engine reuse: must match on every dimension that's baked into the spawn
+            // env at startup. modelId / apiKey / baseUrl / apiFormat are all hardcoded
+            // into the child process's environment vars and CANNOT be changed without
+            // a respawn. If the user switches user_mode (clawparrot ↔ selfhosted) or
+            // changes provider config, the resolved config differs from the running
+            // engine — kill it so the next spawn uses the new endpoint/credentials.
+            const apiKeyChanged = !!engine && engine.apiKey !== config.apiKey;
+            const baseUrlChanged = !!engine && engine.baseUrl !== config.baseUrl;
+            const apiFormatChanged = !!engine && engine.apiFormat !== config.apiFormat;
+            if (engine && (!isEngineAlive(engine) || engine.modelId !== config.modelId || engine.needsRestart || apiKeyChanged || baseUrlChanged || apiFormatChanged)) {
                 killEngine(conversation_id, 'chat_existing_engine_invalid_or_stale', {
                     isAlive: !!isEngineAlive(engine),
                     currentModel: engine && engine.modelId,
                     requestedModel: config.modelId,
                     needsRestart: !!(engine && engine.needsRestart),
+                    apiKeyChanged,
+                    baseUrlChanged,
+                    apiFormatChanged,
                 });
                 engine = null;
             }

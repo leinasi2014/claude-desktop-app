@@ -146,6 +146,39 @@ function isThinkingModel(model: string) {
   return typeof model === 'string' && model.endsWith('-thinking');
 }
 
+// ─── Cross-mode override helpers ──────────────────────────────────────────────
+// When a conversation's model belongs to a different mode than the user is
+// currently in, we let the user opt to "keep using the cross-mode model".
+// The choice is persisted per-conversation in localStorage so the next message
+// in the same conversation continues to use the override mode without re-prompting.
+function getCrossModeOverride(convId: string): 'clawparrot' | 'selfhosted' | null {
+  try {
+    const raw = localStorage.getItem('cross_mode_overrides');
+    if (!raw) return null;
+    const map = JSON.parse(raw);
+    return map[convId] || null;
+  } catch { return null; }
+}
+
+function setCrossModeOverride(convId: string, mode: 'clawparrot' | 'selfhosted') {
+  try {
+    const raw = localStorage.getItem('cross_mode_overrides');
+    const map = raw ? JSON.parse(raw) : {};
+    map[convId] = mode;
+    localStorage.setItem('cross_mode_overrides', JSON.stringify(map));
+  } catch {}
+}
+
+function clearCrossModeOverride(convId: string) {
+  try {
+    const raw = localStorage.getItem('cross_mode_overrides');
+    if (!raw) return;
+    const map = JSON.parse(raw);
+    delete map[convId];
+    localStorage.setItem('cross_mode_overrides', JSON.stringify(map));
+  } catch {}
+}
+
 function isSearchStatusMessage(message: string) {
   if (!message) return false;
   return (
@@ -1102,6 +1135,19 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     return 'claude-sonnet-4-6';
   });
   const [conversationTitle, setConversationTitle] = useState("");
+  // Cross-mode warning: when an existing conversation's model isn't available in the
+  // current user_mode (e.g. user opened a clawparrot-opus chat after switching to
+  // selfhosted), we delay falling back. The first send attempt triggers a modal so
+  // the user explicitly picks "keep cross-mode" or "switch to current mode model".
+  const [crossModeWarning, setCrossModeWarning] = useState<{
+    convId: string;
+    originalModel: string;
+    otherMode: 'clawparrot' | 'selfhosted';
+    fallbackModel: string;
+  } | null>(null);
+  // After user picks "switch model", we proceed to send. Stash the pending send args
+  // here so the modal callback can fire them after dismissal.
+  const pendingCrossModeSendRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     onTitleChange?.(conversationTitle);
@@ -1889,9 +1935,36 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     stopPolling();
     try {
       const data = await getConversation(conversationId);
-      // Restore conversation model, but fall back if the stored model was removed
+      // Restore conversation model. If the stored model isn't available in the
+      // current user_mode (typical case: user switched modes after the conv was
+      // created), DON'T silently fall back — keep showing the original model and
+      // arm a cross-mode warning that fires on the next send attempt. The user
+      // gets to explicitly choose between (a) keep using the cross-mode model or
+      // (b) switch to a model from the current mode.
       if (data.model) {
-        setCurrentModelString(isModelSelectable(data.model) ? data.model : resolveModelForNewChat(data.model));
+        const currentMode = (localStorage.getItem('user_mode') === 'selfhosted' ? 'selfhosted' : 'clawparrot') as 'clawparrot' | 'selfhosted';
+        const otherMode = currentMode === 'selfhosted' ? 'clawparrot' : 'selfhosted';
+        const existingOverride = getCrossModeOverride(conversationId);
+        if (isModelSelectable(data.model)) {
+          // Available in current mode → just use it.
+          setCurrentModelString(data.model);
+          setCrossModeWarning(null);
+        } else if (existingOverride === otherMode) {
+          // User already opted into cross-mode for this conv earlier; keep silent.
+          setCurrentModelString(data.model);
+          setCrossModeWarning(null);
+        } else {
+          // Cross-mode mismatch with no prior choice — arm the warning. We keep
+          // currentModelString = original model (NOT fallback) so the model
+          // selector reflects what the conversation actually uses.
+          setCurrentModelString(data.model);
+          setCrossModeWarning({
+            convId: conversationId,
+            originalModel: data.model,
+            otherMode,
+            fallbackModel: resolveModelForNewChat(data.model),
+          });
+        }
       }
       // Restore research mode toggle
       setResearchMode(!!data.research_mode);
@@ -2092,6 +2165,15 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     const isUploading = pendingFiles.some(f => f.status === 'uploading');
     if (isUploading) {
       alert('文件仍在上传中，请稍等完成后再发送');
+      return;
+    }
+
+    // Cross-mode warning: if the conversation's model belongs to a different
+    // user_mode and the user hasn't yet chosen what to do, defer the send and
+    // show the modal. The modal's callbacks will re-invoke handleSend after
+    // the user picks "keep cross-mode" or "switch model".
+    if (crossModeWarning && crossModeWarning.convId === activeId) {
+      pendingCrossModeSendRef.current = () => handleSend(effectiveText);
       return;
     }
 
@@ -4166,6 +4248,72 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           });
         }}
       />
+
+      {/* Cross-mode warning: conversation's model isn't available in current user_mode */}
+      {crossModeWarning && crossModeWarning.convId === activeId && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-claude-input border border-claude-border rounded-2xl shadow-xl w-[460px] overflow-hidden">
+            <div className="px-6 pt-6 pb-4">
+              <h3 className="text-[16px] font-semibold text-claude-text mb-3">对话模型与当前模式不匹配</h3>
+              <p className="text-[14px] text-claude-textSecondary leading-relaxed">
+                此对话使用的是 <span className="font-mono text-claude-text">{crossModeWarning.originalModel}</span>，
+                它属于 <span className="text-claude-text font-medium">{crossModeWarning.otherMode === 'selfhosted' ? '自部署' : 'Clawparrot'}</span> 模式下的模型。
+                <br /><br />
+                你当前在 <span className="text-claude-text font-medium">{crossModeWarning.otherMode === 'selfhosted' ? 'Clawparrot' : '自部署'}</span> 模式。
+                是要继续在原模式下使用这个模型，还是切换到当前模式下的模型？
+              </p>
+            </div>
+            <div className="px-5 pb-5 pt-2 flex flex-col gap-2">
+              <button
+                onClick={() => {
+                  // Keep cross-mode: persist override, dismiss, then proceed with the pending send
+                  setCrossModeOverride(crossModeWarning.convId, crossModeWarning.otherMode);
+                  const fire = pendingCrossModeSendRef.current;
+                  pendingCrossModeSendRef.current = null;
+                  setCrossModeWarning(null);
+                  if (fire) setTimeout(fire, 0);
+                }}
+                className="w-full px-5 py-2.5 text-[14px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-lg transition-colors text-left"
+              >
+                继续使用 <span className="font-mono">{crossModeWarning.originalModel}</span>
+                <div className="text-[11px] text-claude-textSecondary mt-0.5 font-normal">
+                  这次和以后都通过 {crossModeWarning.otherMode === 'selfhosted' ? '自部署' : 'Clawparrot'} 模式发送
+                </div>
+              </button>
+              <button
+                onClick={async () => {
+                  // Switch model: change conv.model to the current-mode fallback, clear any
+                  // stale override, dismiss the warning, then proceed with the pending send.
+                  const target = crossModeWarning.fallbackModel;
+                  const convId = crossModeWarning.convId;
+                  clearCrossModeOverride(convId);
+                  setCurrentModelString(target);
+                  try { await updateConversation(convId, { model: target }); } catch {}
+                  const fire = pendingCrossModeSendRef.current;
+                  pendingCrossModeSendRef.current = null;
+                  setCrossModeWarning(null);
+                  if (fire) setTimeout(fire, 0);
+                }}
+                className="w-full px-5 py-2.5 text-[14px] font-medium bg-claude-text text-claude-bg hover:opacity-90 rounded-lg transition-opacity text-left"
+              >
+                切换到 <span className="font-mono">{crossModeWarning.fallbackModel}</span>
+                <div className="text-[11px] opacity-70 mt-0.5 font-normal">
+                  切完后这个对话会用当前 {crossModeWarning.otherMode === 'selfhosted' ? 'Clawparrot' : '自部署'} 模式
+                </div>
+              </button>
+              <button
+                onClick={() => {
+                  pendingCrossModeSendRef.current = null;
+                  setCrossModeWarning(null);
+                }}
+                className="w-full px-5 py-1.5 text-[12px] text-claude-textSecondary hover:text-claude-text transition-colors mt-1"
+              >
+                取消，先不发送
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Compact conversation dialog */}
       {showCompactDialog && (
